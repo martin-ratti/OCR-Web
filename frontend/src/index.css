@@ -4,33 +4,30 @@
 
 @layer base {
   :root {
-    /* Paleta Tierno & Friendly (Rosas y Verdes suaves) */
-    --background: 340 50% 98%;   /* Blanco muy suavemente rosado */
-    --foreground: 340 20% 20%;   /* Gris oscuro pero cálido (legibilidad sin ser negro puro) */
-    --card: 0 0% 100%;           /* Blanco puro */
+    --background: 340 50% 98%;
+    --foreground: 340 20% 20%;
+    --card: 0 0% 100%;
     --card-foreground: 330 20% 20%;
     --popover: 0 0% 100%;
     --popover-foreground: 330 20% 20%;
-    --primary: 340 82% 65%;      /* Color Rosa Lindo (Pink 400 approx) */
-    --primary-foreground: 0 0% 100%; /* Texto blanco sobre botones rotas */
-    --secondary: 160 50% 60%;    /* Verde menta sutil para acentos (Mint/Teal) */
+    --primary: 340 82% 65%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 160 50% 60%;
     --secondary-foreground: 0 0% 100%;
-    --muted: 340 20% 95%;        /* Gris rosadito suave */
+    --muted: 340 20% 95%;
     --muted-foreground: 330 15% 45%; 
-    --accent: 345 70% 88%;       /* Rosa clarito para hovers */
+    --accent: 345 70% 88%;
     --accent-foreground: 340 60% 40%;
     --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 98%;
-    --border: 340 30% 90%;       /* Bordes muy tenues */
+    --border: 340 30% 90%;
     --input: 340 30% 90%;
     --ring: 340 82% 65%;
     
-    --radius: 1rem;              /* Muy redondeado y amigable */
+    --radius: 1rem;
   }
 
   .dark {
-    /* Desactivamos el dark mode explícitamente para mantener el tema amigable y tierno (Papel, luz) 
-       Simplemente replicamos las variables base. */
     --background: 340 50% 98%;
     --foreground: 340 20% 20%;
     --card: 0 0% 100%;
@@ -47,7 +44,6 @@
   }
   body, html {
     @apply bg-background text-foreground antialiased;
-    /* Fuente por defecto tildada hacia sans estándar redondeada amigable */
     font-family: ui-rounded, "Nunito", "Quicksand", system-ui, sans-serif;
   }
   
@@ -55,7 +51,6 @@
     @apply bg-pink-200 text-pink-900;
   }
   
-  /* Utils livianos genéricos */
   .paper-card {
     @apply bg-white rounded-2xl border-2 border-pink-100 shadow-[0_4px_12px_rgba(244,114,182,0.1)] transition-all;
   }
@@ -64,14 +59,12 @@
     @apply active:scale-95 transition-transform duration-200 ease-out;
   }
 
-  /* Patrón de puntitos ligero en CSS (No pesa nada en GPU) */
   .bg-dot-pattern {
     background-image: radial-gradient(rgba(244, 114, 182, 0.15) 2px, transparent 2px);
     background-size: 24px 24px;
     background-position: -12px -12px;
   }
 
-  /* Estilo Hoja de Agenda (Renglones) */
   .agenda-paper {
     background-color: #fffafb;
     background-image: 
