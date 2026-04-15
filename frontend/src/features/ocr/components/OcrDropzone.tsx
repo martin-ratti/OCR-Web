@@ -1,6 +1,6 @@
 import React, { useCallback, useRef, useState } from 'react';
 import { useOcrStore } from '../../../store/useOcrStore';
-import { ImagePlus, Images } from 'lucide-react';
+import { ImagePlus, Images, Heart, Folder } from 'lucide-react';
 
 export function OcrDropzone() {
   const addFiles = useOcrStore((state) => state.addFiles);
@@ -51,8 +51,10 @@ export function OcrDropzone() {
           <ImagePlus className="w-12 h-12" />
         </div>
         
-        <h2 className="text-xl font-extrabold text-foreground mb-2 text-center">
-          {isDragging ? '¡Sueltalo negra! ☕' : 'Toca para subir el chisme (tus hojas)'}
+        <h2 className="text-xl font-extrabold text-foreground mb-2 text-center flex items-center gap-2">
+          {isDragging ? (
+            <>¡Sueltalo negra! <Heart className="w-5 h-5 text-pink-500 fill-current animate-bounce" /></>
+          ) : 'Toca para subir el chisme (tus hojas)'}
         </h2>
         <p className="text-muted-foreground text-sm text-center font-bold max-w-[250px]">
           Arrastrá las fotos acá. Las cosas como son, nadie quiere tipear todo a mano.
@@ -79,7 +81,7 @@ export function OcrDropzone() {
         className="paper-card btn-bounce flex items-center justify-center gap-3 w-full py-4 border-none bg-emerald-100 hover:bg-emerald-200 text-emerald-700 font-extrabold shadow-sm text-[15px]"
       >
         <Images className="w-6 h-6" />
-        Dale nena, subí toda la carpeta 📂
+        Dale nena, subí toda la carpeta <Folder className="w-5 h-5 fill-current" />
       </button>
 
       {/* Evitamos error TS forzando los props non-standard de webkitdirectory */}

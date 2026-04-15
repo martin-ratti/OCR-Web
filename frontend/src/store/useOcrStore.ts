@@ -91,7 +91,7 @@ export const useOcrStore = create<OcrState>((set, get) => ({
       }));
 
       let attempt = 0;
-      const maxAttempts = 3;
+      const maxAttempts = 5; // Aumentado a 5 reintentos
       let success = false;
 
       while (attempt < maxAttempts && !success) {
@@ -109,7 +109,10 @@ export const useOcrStore = create<OcrState>((set, get) => ({
             const errData = await response.json().catch(() => null);
             const errMsg = errData?.warnings?.[0] || response.statusText;
             
-            if (response.status === 429 || response.status === 503 || errMsg.includes('503') || errMsg.includes('429') || errMsg.includes('high demand') || errMsg.includes('Too Many Requests')) {
+            const isRateLimit = response.status === 429 || response.status === 503 || 
+                                /503|429|high demand|Too Many Requests|Quota|exhausted|rate limit/i.test(errMsg);
+                                
+            if (isRateLimit) {
                throw new Error('RateLimit');
             }
             throw new Error(`Error HTTP: ${errMsg}`);
@@ -118,35 +121,43 @@ export const useOcrStore = create<OcrState>((set, get) => ({
           const data = await response.json();
           
           if (data.status === 'error') {
-             if(data.warnings?.[0]?.includes('503') || data.warnings?.[0]?.includes('429') || data.warnings?.[0]?.includes('high demand')){
+             const isRateLimit = /503|429|high demand|Too Many Requests|Quota|exhausted|rate limit/i.test(data.warnings?.[0] || '');
+             if(isRateLimit){
                 throw new Error('RateLimit');
              }
              throw new Error(data.warnings?.[0] || 'Unknown error');
           }
 
           set(s => ({
-            files: s.files.map(f => f.id === file.id ? { ...f, status: 'success', resultText: data.text } : f)
+            files: s.files.map(f => f.id === file.id ? { ...f, status: 'success', resultText: data.text, errorMessage: undefined } : f)
           }));
           success = true;
 
         } catch (err: any) {
           if (err.message === 'RateLimit' && attempt < maxAttempts - 1) {
             attempt++;
-            // Reintento exponencial (5s, 10s...)
-            await new Promise(res => setTimeout(res, 5000 * attempt));
+            
+            // Reintento exponencial (10s, 20s, 30s...) que garantice limpiar la ventana de RPM
+            const backoffTime = 10000 * attempt;
+            
+            set(s => ({
+              files: s.files.map(f => f.id === file.id ? { ...f, errorMessage: `Tranquila mi ciela. La IA se saturó un poquito. Esperando ${attempt * 10} segundos para el reintento ${attempt}/${maxAttempts - 1}...` } : f)
+            }));
+            
+            await new Promise(res => setTimeout(res, backoffTime));
             continue;
           }
           
           set(s => ({
-            files: s.files.map(f => f.id === file.id ? { ...f, status: 'error', errorMessage: err.message === 'RateLimit' ? 'Límite de la IA alcanzado por hoy.' : err.message } : f)
+            files: s.files.map(f => f.id === file.id ? { ...f, status: 'error', errorMessage: err.message === 'RateLimit' ? 'Límite de la IA alcanzado por completo hoy. ¡Volvé mañana o intentá de a uno! ' : err.message } : f)
           }));
           break; // Rompe el while si falla definitivamente
         }
       }
 
-      // Si quedan archivos por procesar, aguardamos 4 segundos para respetar el límite de 15 RPM
+      // Si quedan archivos por procesar, aguardamos 6 segundos para respetar el límite de 15 RPM y evitar error (Pide paciencia)
       if(i < filesToProcess.length - 1) {
-         await new Promise(res => setTimeout(res, 4000));
+         await new Promise(res => setTimeout(res, 6000));
       }
 
       processedCount++;
