@@ -1,6 +1,5 @@
-
 import { useOcrStore } from '../../../store/useOcrStore';
-import { Sparkles, Save, Copy, FileText, CheckCircle2, CircleDashed, Eraser } from 'lucide-react';
+import { Save, Copy, CheckCircle2, CircleDashed, Eraser, Trash2, Camera, HeartPulse } from 'lucide-react';
 
 export function OcrWorkspace() {
   const { files, activeFileId, globalStatus, updateFileResult, setActiveFile, processAll, clearAll } = useOcrStore();
@@ -9,8 +8,6 @@ export function OcrWorkspace() {
 
   const handleCleanFormat = () => {
     if (!activeFile?.resultText) return;
-    // Replicar la logica de Python GUI:
-    // Reemplaza multiples saltos por un tag, un salto p/espacio, luego restaura multiples saltos.
     let text = activeFile.resultText.replace(/\n\n/g, '___PARAGRAPH_BREAK___');
     text = text.replace(/\n/g, ' ');
     text = text.replace(/___PARAGRAPH_BREAK___/g, '\n\n');
@@ -28,47 +25,52 @@ export function OcrWorkspace() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `OCR_${activeFile.file.name}.txt`;
+    a.download = `Apunte_${activeFile.file.name}.txt`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
   return (
-    <div className="flex flex-col h-[calc(100vh-6rem)] w-full max-w-7xl mx-auto border-2 border-primary/20 rounded-xl overflow-hidden bg-background">
+    <div className="flex flex-col h-[calc(100vh-12rem)] w-full mx-auto paper-card overflow-hidden">
       
       {/* Top Toolbar */}
-      <div className="flex justify-between items-center bg-card p-4 border-b border-border">
+      <div className="flex justify-between items-center bg-pink-50 p-4 border-b-2 border-pink-100">
         <div className="flex items-center gap-3">
           <button 
             onClick={processAll} 
             disabled={globalStatus === 'working'}
-            className="flex items-center gap-2 bg-primary text-white px-4 py-2 rounded-lg font-bold hover:bg-primary/90 disabled:opacity-50 transition"
+            className="btn-bounce flex items-center gap-2 bg-pink-400 text-white px-5 py-2.5 rounded-full font-extrabold hover:bg-pink-500 disabled:opacity-50 shadow-md shadow-pink-200"
           >
-            <Sparkles className="w-5 h-5" />
-            Extraer Todo
+            {globalStatus === 'working' ? (
+               <CircleDashed className="w-5 h-5 animate-spin" />
+            ) : (
+               <HeartPulse className="w-5 h-5" />
+            )}
+            ¡DALAAAA! ✨
           </button>
           
           <button 
             onClick={clearAll} 
-            className="flex items-center gap-2 border border-destructive text-destructive px-4 py-2 rounded-lg font-bold hover:bg-destructive/10 transition"
+            className="btn-bounce flex items-center gap-2 bg-white text-rose-500 px-4 py-2.5 rounded-full font-bold hover:bg-rose-50 border-2 border-rose-100 transition-colors"
           >
-            Limpiar Lista
+            <Trash2 className="w-4 h-4" />
+            Sacá todo esto
           </button>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 bg-white p-1 rounded-full border-2 border-pink-100 shadow-sm">
            <button 
              onClick={handleCleanFormat} 
              disabled={!activeFile?.resultText}
-             className="p-2 rounded-lg text-secondary hover:bg-secondary/10 disabled:opacity-50 transition"
-             title="Limpiar Formato"
+             className="btn-bounce p-2.5 rounded-full text-zinc-400 hover:text-emerald-500 hover:bg-emerald-50 disabled:opacity-30 transition-colors"
+             title="Ordenar Párrafos"
            >
              <Eraser className="w-5 h-5" />
            </button>
            <button 
              onClick={handleCopy} 
              disabled={!activeFile?.resultText}
-             className="p-2 rounded-lg text-secondary hover:bg-secondary/10 disabled:opacity-50 transition"
+             className="btn-bounce p-2.5 rounded-full text-zinc-400 hover:text-pink-500 hover:bg-pink-50 disabled:opacity-30 transition-colors"
              title="Copiar Texto"
            >
              <Copy className="w-5 h-5" />
@@ -76,32 +78,38 @@ export function OcrWorkspace() {
            <button 
              onClick={handleSave} 
              disabled={!activeFile?.resultText}
-             className="p-2 rounded-lg text-primary hover:bg-primary/10 disabled:opacity-50 transition"
-             title="Guardar TXT"
+             className="btn-bounce p-2.5 rounded-full text-zinc-400 hover:text-indigo-500 hover:bg-indigo-50 disabled:opacity-30 transition-colors"
+             title="Guardar como TXT"
            >
              <Save className="w-5 h-5" />
            </button>
         </div>
       </div>
 
-      <div className="flex h-full min-h-0">
+      <div className="flex flex-1 min-h-0 bg-transparent">
         
         {/* Panel Izquierdo: Lista de Archivos */}
-        <div className="w-64 border-r border-border bg-card p-2 overflow-y-auto flex flex-col gap-1">
+        <div className="w-72 border-r-2 border-pink-100 bg-white/60 p-3 overflow-y-auto flex flex-col gap-2">
+          <div className="sticky top-0 pb-2 mb-2 border-b-2 border-pink-100 bg-white/90 z-10 font-black text-[12px] text-pink-400 uppercase flex items-center justify-between px-2">
+            <span>La data 📂</span>
+            <span className="bg-pink-100 text-pink-600 px-2 py-0.5 rounded-full">{files.length}</span>
+          </div>
           {files.map(file => (
             <button
-              key={file.id}
-              onClick={() => setActiveFile(file.id)}
-              className={`flex items-center gap-2 w-full text-left p-3 rounded-lg transition ${activeFileId === file.id ? 'bg-primary/10 border border-primary/20 shadow-sm' : 'hover:bg-muted'}`}
+               key={file.id}
+               onClick={() => setActiveFile(file.id)}
+               className={`flex items-center gap-3 w-full text-left p-3 rounded-2xl transition-all btn-bounce ${activeFileId === file.id ? 'bg-pink-100 border-pink-300 border-2 shadow-sm' : 'hover:bg-pink-50 border-2 border-transparent'}`}
             >
-              {file.status === 'success' ? (
-                <CheckCircle2 className="w-4 h-4 text-primary shrink-0" />
-              ) : file.status === 'processing' ? (
-                <CircleDashed className="w-4 h-4 text-secondary animate-spin shrink-0" />
-              ) : (
-                <FileText className="w-4 h-4 text-muted-foreground shrink-0" />
-              )}
-              <span className="truncate flex-1 text-sm font-medium" style={{ color: file.status === 'success' ? 'hsl(var(--foreground))' : 'hsl(var(--muted-foreground))' }}>
+              <div className="mr-1 shrink-0">
+                {file.status === 'success' ? (
+                  <CheckCircle2 className="w-6 h-6 text-emerald-400" />
+                ) : file.status === 'processing' ? (
+                  <CircleDashed className="w-6 h-6 text-pink-400 animate-spin" />
+                ) : (
+                  <Camera className={`w-5 h-5 ${activeFileId === file.id ? 'text-pink-500' : 'text-zinc-300'}`} />
+                )}
+              </div>
+              <span className={`truncate flex-1 text-sm font-bold ${activeFileId === file.id ? 'text-pink-600' : (file.status === 'success' ? 'text-zinc-700' : 'text-zinc-400')}`}>
                 {file.file.name}
               </span>
             </button>
@@ -109,35 +117,43 @@ export function OcrWorkspace() {
         </div>
 
         {/* Panel Central: Imagen */}
-        <div className="flex-1 bg-muted/30 p-4 border-r border-border overflow-hidden">
+        <div className="flex-1 p-5 border-r-2 border-pink-100 bg-zinc-50 relative flex flex-col">
+          <div className="absolute top-4 left-4 z-10 bg-white px-4 py-1.5 rounded-full text-xs font-bold text-pink-400 shadow-sm border-2 border-pink-100">
+             📷 Evidencia A
+          </div>
           {activeFile ? (
-            <img 
-              src={activeFile.previewUrl} 
-              alt="Preview preview" 
-              className="w-full h-full object-contain drop-shadow-md rounded border border-border"
-            />
+            <div className="w-full h-full p-2 flex items-center justify-center">
+              <img 
+                src={activeFile.previewUrl} 
+                alt="Preview" 
+                className="max-w-full max-h-full object-contain drop-shadow-md rounded-xl"
+              />
+            </div>
           ) : (
-            <div className="w-full h-full flex items-center justify-center text-muted-foreground">
-              Ninguna imagen seleccionada
+            <div className="w-full h-full flex flex-col items-center justify-center text-zinc-300">
+              <Camera className="w-16 h-16 mb-2 text-pink-100" />
+              <span className="font-bold text-pink-200">En fin, la hipotenusa. Elegí algo.</span>
             </div>
           )}
         </div>
 
-        {/* Panel Derecho: Texto Resultado */}
-        <div className="flex-1 p-4 bg-white relative">
+        {/* Panel Derecho: Texto extraído (HOJA DE AGENDA CON RENGLONES) */}
+        <div className="flex-1 flex flex-col relative min-w-[40%] bg-pink-50 border-l border-pink-200">
            {activeFile?.status === 'processing' && (
-             <div className="absolute inset-0 bg-white/70 backdrop-blur-sm z-10 flex flex-col items-center justify-center gap-3">
-                <CircleDashed className="w-12 h-12 text-secondary animate-spin" />
-                <p className="font-bold text-secondary">La IA de Gemini está analizando...</p>
+             <div className="absolute inset-0 bg-white/90 z-20 flex flex-col items-center justify-center gap-4">
+                <CircleDashed className="w-14 h-14 text-pink-400 animate-spin" />
+                <p className="font-extrabold text-pink-500 text-lg animate-pulse">Tranquila negra, procesando... ☕</p>
              </div>
            )}
            
-           <textarea 
-             className="w-full h-full resize-none outline-none text-foreground bg-transparent p-2"
-             value={activeFile?.resultText || activeFile?.errorMessage || (activeFile?.status === 'idle' ? "Pendiente a procesar..." : "")}
-             readOnly
-             placeholder="El texto extraído aparecerá aquí."
-           />
+           <div className="flex-1 h-full w-full">
+             <textarea 
+               className="w-full h-full resize-none outline-none text-slate-800 font-medium text-[16px] custom-scrollbar placeholder:text-zinc-400 agenda-paper pl-[80px] pt-[30px] pr-5"
+               value={activeFile?.resultText || activeFile?.errorMessage || (activeFile?.status === 'idle' ? "Mi ciela, acá va a aparecer todo tipeado como en los mismísimos renglones de tu agenda 💅\n\nPresioná '¡DALAAAA!' para que la magia suceda." : "")}
+               readOnly
+               placeholder="¡Acá va a aparecer la data!"
+             />
+           </div>
         </div>
 
       </div>
