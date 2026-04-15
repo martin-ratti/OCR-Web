@@ -22,15 +22,15 @@ export class OcrService {
    * @returns El texto extraído en formato Markdown limpio.
    */
   public async extractTextFromBuffer(imageBuffer: Buffer, mimeType: string): Promise<string> {
-    const prompt = `ERES UN FILTRO ÓPTICO CROMÁTICO ESTRICTO. Tu misión principal e inquebrantable es ignorar por completo el papel blanco y extraer ÚNICAMENTE el texto cruzado o pintado con marcador fluorescente.
+    const prompt = `ERES UN FILTRO ÓPTICO CROMÁTICO. Tu misión principal es extraer ÚNICAMENTE el texto que haya sido resaltado con marcador fluorescente.
 
-REGLAS ABSOLUTAS (Si incumples alguna, fallarás irreparablemente):
-1. NUNCA transcribas texto sobre papel blanco o gris. Debes ser un cirujano visual: si un párrafo no está pintado a color, IGNÓRALO por completo.
-2. CORTE ABRUPTO: Si un párrafo o frase empieza pintada y la pintura se corta a la mitad, tu lectura también se corta ahí. Amputa todo lo blanco, aunque la frase quede incompleta.
-3. RAZONAMIENTO OBLIGATORIO: Tu respuesta SIEMPRE debe comenzar con un bloque de análisis encerrado en etiquetas <ANALISIS> y </ANALISIS>. Dentro de él, tómate un momento para inspeccionar la geometría visual de la página y describe exactamente en una frase qué ves pintado y qué ves en blanco.
-4. RESULTADO: Inmediatamente después de cerrar el tag </ANALISIS>, escribe o imprime "TEXTO FINAL:" y a continuación pega tu extracción. Si decidiste en el análisis que no hay nada resaltado, debajo de TEXTO FINAL: solo dirá "No se detectó texto resaltado en esta imagen.".
-5. FORMATO: El TEXTO FINAL no debe tener asteriscos ni decoraciones, debe ser texto plano fusionando los saltos de línea (enters) que corten palabras debido al margen, dejando solo los verdaderos saltos de párrafo.
-6. COMPENSACIÓN: Trata de rotar el texto mentalmente si la foto está de costado.`;
+REGLAS ABSOLUTAS:
+1. FILTRO DE PÁRRAFOS: Analiza cada párrafo como un "bloque". Si un bloque entero es papel blanco puro sin color, IGNÓRALO por completo. JAMÁS transcribas párrafos que no estén resaltados.
+2. LECTURA TOLERANTE: Si un párrafo sí está resaltado a color, transcríbelo completo de principio a fin de la marca. Ignora si el trazo del marcador es imperfecto, si hay espacios blancos naturales entre líneas, o si el color pierde fuerza al borde de la página. No cortes la lectura a la mitad por culpa de un mal trazado del fibrón.
+3. RAZONAMIENTO OBLIGATORIO: Tu respuesta SIEMPRE debe comenzar con un bloque de análisis encerrado en etiquetas <ANALISIS> y </ANALISIS>. Dentro de él, indica qué párrafos ves pintados y cuáles en blanco.
+4. RESULTADO: Después de </ANALISIS>, escribe "TEXTO FINAL:" y a continuación pega tu extracción. Si no hay nada resaltado, debajo de TEXTO FINAL: solo dirá "No se detectó texto resaltado en esta imagen.".
+5. FORMATO NATURAL: El TEXTO FINAL debe ser plano. Fusiona los saltos de línea (enters) que corten palabras en la orilla derecha, dejando solo los saltos que separen párrafos. Sin asteriscos ni adornos de markdown.
+6. COMPENSACIÓN: Evalúa la rotación del texto y endereza la lectura si la foto está de costado.`;
 
     try {
       const response = await this.ai.models.generateContent({
