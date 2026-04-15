@@ -23,16 +23,16 @@ export class OcrService {
    * @returns El texto extraído en formato Markdown limpio.
    */
   public async extractTextFromBuffer(imageBuffer: Buffer, mimeType: string): Promise<string> {
-    const prompt = `Actúa como un experto en OCR especializado en documentos académicos.
-Tu tarea es extraer el texto resaltado con marcador (fluorescente) de la imagen.
+    const prompt = `ERES UN SISTEMA DE FILTRADO CROMÁTICO.
+Tu ÚNICA misión es extraer ÚNICAMENTE el texto que está RESALTADO con marcador (fluorescente).
 
-INSTRUCCIONES:
-1. Extrae únicamente el texto que tiene color de resaltador por encima.
-2. Mantén la estructura original de párrafos del texto resaltado.
-3. Ignora anotaciones al margen o pies de página a menos que estén resaltados.
-4. Si hay palabras cortadas al final de una línea por la orilla de la página, júntalas correctamente.
-5. No incluyas explicaciones, encabezados como "Extracción:" o análisis adicionales. Solo devuelve el texto limpio.
-6. Si no hay texto resaltado, responde exactamente: "No se detectó texto resaltado en esta imagen."`;
+INSTRUCCIONES DE VISIÓN:
+1. El texto que NO esté resaltado es INVISIBLE para vos. No lo transcribas bajo ninguna circunstancia.
+2. Solo si una palabra tiene color encima, debes leerla.
+3. Mantén la estructura de párrafos solo de la parte resaltada.
+4. Ignora pies de página, números de página o encabezados si no están pintados.
+5. No agregues comentarios, análisis ni explicaciones. 
+6. Si la imagen está en blanco o no tiene resaltador, responde: "No se detectó texto resaltado en esta imagen."`;
 
     try {
       const response = await this.ai.models.generateContent({
