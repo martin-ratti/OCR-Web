@@ -83,38 +83,70 @@ export const useOcrStore = create<OcrState>((set, get) => ({
 
     let processedCount = 0;
 
-    for (const file of filesToProcess) {
+    for (let i = 0; i < filesToProcess.length; i++) {
+      const file = filesToProcess[i];
+      
       set(s => ({
         files: s.files.map(f => f.id === file.id ? { ...f, status: 'processing' } : f)
       }));
 
-      try {
-        const formData = new FormData();
-        formData.append('image', file.file);
+      let attempt = 0;
+      const maxAttempts = 3;
+      let success = false;
 
-        // Llamada a nuestro backend Node.js
-        const response = await fetch('http://localhost:3001/api/ocr/extract', {
-          method: 'POST',
-          body: formData,
-        });
+      while (attempt < maxAttempts && !success) {
+        try {
+          const formData = new FormData();
+          formData.append('image', file.file);
 
-        if (!response.ok) {
-          throw new Error('Error HTTP: ' + response.statusText);
+          const response = await fetch('http://localhost:3001/api/ocr/extract', {
+            method: 'POST',
+            body: formData,
+          });
+
+          if (!response.ok) {
+            // El backend atrapa el error de Gemini y tira 500, leemos el body para ver si es de RateLimit
+            const errData = await response.json().catch(() => null);
+            const errMsg = errData?.warnings?.[0] || response.statusText;
+            
+            if (response.status === 429 || response.status === 503 || errMsg.includes('503') || errMsg.includes('429') || errMsg.includes('high demand') || errMsg.includes('Too Many Requests')) {
+               throw new Error('RateLimit');
+            }
+            throw new Error(`Error HTTP: ${errMsg}`);
+          }
+
+          const data = await response.json();
+          
+          if (data.status === 'error') {
+             if(data.warnings?.[0]?.includes('503') || data.warnings?.[0]?.includes('429') || data.warnings?.[0]?.includes('high demand')){
+                throw new Error('RateLimit');
+             }
+             throw new Error(data.warnings?.[0] || 'Unknown error');
+          }
+
+          set(s => ({
+            files: s.files.map(f => f.id === file.id ? { ...f, status: 'success', resultText: data.text } : f)
+          }));
+          success = true;
+
+        } catch (err: any) {
+          if (err.message === 'RateLimit' && attempt < maxAttempts - 1) {
+            attempt++;
+            // Reintento exponencial (5s, 10s...)
+            await new Promise(res => setTimeout(res, 5000 * attempt));
+            continue;
+          }
+          
+          set(s => ({
+            files: s.files.map(f => f.id === file.id ? { ...f, status: 'error', errorMessage: err.message === 'RateLimit' ? 'Límite de la IA alcanzado por hoy.' : err.message } : f)
+          }));
+          break; // Rompe el while si falla definitivamente
         }
+      }
 
-        const data = await response.json();
-        
-        if (data.status === 'error') {
-          throw new Error(data.warnings?.[0] || 'Unknown error');
-        }
-
-        set(s => ({
-          files: s.files.map(f => f.id === file.id ? { ...f, status: 'success', resultText: data.text } : f)
-        }));
-      } catch (err: any) {
-        set(s => ({
-          files: s.files.map(f => f.id === file.id ? { ...f, status: 'error', errorMessage: err.message } : f)
-        }));
+      // Si quedan archivos por procesar, aguardamos 4 segundos para respetar el límite de 15 RPM
+      if(i < filesToProcess.length - 1) {
+         await new Promise(res => setTimeout(res, 4000));
       }
 
       processedCount++;
