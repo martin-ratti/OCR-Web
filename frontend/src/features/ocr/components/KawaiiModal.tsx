@@ -1,4 +1,4 @@
-import { Sparkles, X, Heart } from 'lucide-react';
+import { Sparkles, X } from 'lucide-react';
 import { PandaIcon, MonkeyIcon } from './MascotIcons';
 
 interface KawaiiModalProps {
