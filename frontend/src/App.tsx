@@ -21,7 +21,7 @@ export default function App() {
           Sirviendo Apuntes <Sparkles className="w-8 h-8 text-primary animate-pulse" />
         </h1>
         <p className="text-muted-foreground text-sm md:text-base max-w-xl mx-auto px-4 font-bold flex items-center justify-center gap-1 flex-wrap">
-          ¡Sube las fotos de tus libros y yo extraigo el texto! Esta data está literal para decir: QUEDAAA <Sparkles className="w-4 h-4 text-primary" />. You're my person.
+          ¡Sube las fotos de tus libros y yo extraigo el texto! Esta data está literal para decir: QUEDAAA <Sparkles className="w-5 h-5 text-primary animate-pulse inline-block" />
         </p>
       </div>
 

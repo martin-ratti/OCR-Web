@@ -1,12 +1,15 @@
 import React, { useCallback, useRef, useState } from 'react';
 import { useOcrStore } from '../../../store/useOcrStore';
 import { ImagePlus, Images, Heart, Folder } from 'lucide-react';
+import { KawaiiModal } from './KawaiiModal';
 
 export function OcrDropzone() {
   const addFiles = useOcrStore((state) => state.addFiles);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [showFolderConfirm, setShowFolderConfirm] = useState(false);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
 
   const onDragOver = (e: React.DragEvent) => {
     e.preventDefault();
@@ -32,6 +35,28 @@ export function OcrDropzone() {
       const validFiles = Array.from(e.target.files).filter(f => f.type.startsWith('image/'));
       addFiles(validFiles);
     }
+  };
+
+  const handleFolderSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      const validFiles = Array.from(e.target.files).filter(f => f.type.startsWith('image/'));
+      if (validFiles.length > 0) {
+        setPendingFiles(validFiles);
+        setShowFolderConfirm(true);
+      }
+    }
+    // Reseteamos el input para que pueda volver a dispararse el evento si se elige la misma carpeta
+    e.target.value = '';
+  };
+
+  const handleFolderClick = () => {
+    folderInputRef.current?.click();
+  };
+
+  const confirmFolderUpload = () => {
+    addFiles(pendingFiles);
+    setPendingFiles([]);
+    setShowFolderConfirm(false);
   };
 
   return (
@@ -77,7 +102,7 @@ export function OcrDropzone() {
       </div>
 
       <button 
-        onClick={() => folderInputRef.current?.click()}
+        onClick={handleFolderClick}
         className="paper-card btn-bounce flex items-center justify-center gap-3 w-full py-4 border-none bg-emerald-100 hover:bg-emerald-200 text-emerald-700 font-extrabold shadow-sm text-[15px]"
       >
         <Images className="w-6 h-6" />
@@ -88,9 +113,23 @@ export function OcrDropzone() {
       <input 
         type="file" 
         ref={folderInputRef} 
-        onChange={handleFileSelect}
+        onChange={handleFolderSelect}
         className="hidden" 
         {...({ webkitdirectory: "", directory: "" } as any)}
+      />
+
+      <KawaiiModal 
+        isOpen={showFolderConfirm}
+        onClose={() => {
+          setShowFolderConfirm(false);
+          setPendingFiles([]);
+        }}
+        onConfirm={confirmFolderUpload}
+        title="¡Chisme detectado!"
+        description={`Elegiste una carpeta con ${pendingFiles.length} imágenes. ¿Querés que las procese todas de una? Ojo que puede tardar un poquito.`}
+        confirmText="¡Sí, mandale mecha!"
+        cancelText="Pará, me arrepentí"
+        mascotType="monkey"
       />
     </div>
   );

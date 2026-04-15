@@ -8,7 +8,8 @@ export class OcrService {
 
   constructor() {
     this.ai = new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY || ""
+      apiKey: process.env.GEMINI_API_KEY || "",
+      apiVersion: "v1"
     });
   }
 
@@ -22,19 +23,20 @@ export class OcrService {
    * @returns El texto extraído en formato Markdown limpio.
    */
   public async extractTextFromBuffer(imageBuffer: Buffer, mimeType: string): Promise<string> {
-    const prompt = `ERES UN FILTRO ÓPTICO CROMÁTICO. Tu misión principal es extraer ÚNICAMENTE el texto que haya sido resaltado con marcador fluorescente.
+    const prompt = `Actúa como un experto en OCR especializado en documentos académicos.
+Tu tarea es extraer el texto resaltado con marcador (fluorescente) de la imagen.
 
-REGLAS ABSOLUTAS:
-1. FILTRO DE PÁRRAFOS: Analiza cada párrafo como un "bloque". Si un bloque entero es papel blanco puro sin color, IGNÓRALO por completo. JAMÁS transcribas párrafos que no estén resaltados.
-2. LECTURA TOLERANTE: Si un párrafo sí está resaltado a color, transcríbelo completo de principio a fin de la marca. Ignora si el trazo del marcador es imperfecto, si hay espacios blancos naturales entre líneas, o si el color pierde fuerza al borde de la página. No cortes la lectura a la mitad por culpa de un mal trazado del fibrón.
-3. RAZONAMIENTO OBLIGATORIO: Tu respuesta SIEMPRE debe comenzar con un bloque de análisis encerrado en etiquetas <ANALISIS> y </ANALISIS>. Dentro de él, indica qué párrafos ves pintados y cuáles en blanco.
-4. RESULTADO: Después de </ANALISIS>, escribe "TEXTO FINAL:" y a continuación pega tu extracción. Si no hay nada resaltado, debajo de TEXTO FINAL: solo dirá "No se detectó texto resaltado en esta imagen.".
-5. FORMATO NATURAL: El TEXTO FINAL debe ser plano. Fusiona los saltos de línea (enters) que corten palabras en la orilla derecha, dejando solo los saltos que separen párrafos. Sin asteriscos ni adornos de markdown.
-6. COMPENSACIÓN: Evalúa la rotación del texto y endereza la lectura si la foto está de costado.`;
+INSTRUCCIONES:
+1. Extrae únicamente el texto que tiene color de resaltador por encima.
+2. Mantén la estructura original de párrafos del texto resaltado.
+3. Ignora anotaciones al margen o pies de página a menos que estén resaltados.
+4. Si hay palabras cortadas al final de una línea por la orilla de la página, júntalas correctamente.
+5. No incluyas explicaciones, encabezados como "Extracción:" o análisis adicionales. Solo devuelve el texto limpio.
+6. Si no hay texto resaltado, responde exactamente: "No se detectó texto resaltado en esta imagen."`;
 
     try {
       const response = await this.ai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-2.5-flash-lite",
         contents: [
           prompt,
           { inlineData: { data: imageBuffer.toString("base64"), mimeType } }
@@ -47,16 +49,12 @@ REGLAS ABSOLUTAS:
       // El SDK oficial de @google/genai expone 'text' como un atributo directo.
       let rawText = response.text ? response.text.trim() : "";
       
-      // Limpiamos el Chain of Thought oculto del usuario
-      if (rawText.includes("TEXTO FINAL:")) {
-        rawText = rawText.split("TEXTO FINAL:")[1];
-      } else if (rawText.includes("</ANALISIS>")) {
-        rawText = rawText.split("</ANALISIS>")[1];
-      }
-      return rawText.trim();
+      // El prompt ahora es directo, así que devolvemos el texto tal cual (limpio de espacios)
+      return rawText;
     } catch (error: any) {
       console.error("[OcrService Error]:", error);
-      throw new Error(`Google GenAI falló al procesar la imagen: ${error?.message || "Error desconocido"}`);
+      // Propagamos el error de forma que el controlador pueda detectar el status 429 si existe
+      throw error;
     }
   }
 }

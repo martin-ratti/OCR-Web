@@ -105,12 +105,11 @@ export const useOcrStore = create<OcrState>((set, get) => ({
           });
 
           if (!response.ok) {
-            // El backend atrapa el error de Gemini y tira 500, leemos el body para ver si es de RateLimit
             const errData = await response.json().catch(() => null);
             const errMsg = errData?.warnings?.[0] || response.statusText;
             
             const isRateLimit = response.status === 429 || response.status === 503 || 
-                                /503|429|high demand|Too Many Requests|Quota|exhausted|rate limit/i.test(errMsg);
+                                /RESOURCE_EXHAUSTED|Quota|exhausted|rate limit|429/i.test(errMsg);
                                 
             if (isRateLimit) {
                throw new Error('RateLimit');
@@ -121,7 +120,7 @@ export const useOcrStore = create<OcrState>((set, get) => ({
           const data = await response.json();
           
           if (data.status === 'error') {
-             const isRateLimit = /503|429|high demand|Too Many Requests|Quota|exhausted|rate limit/i.test(data.warnings?.[0] || '');
+             const isRateLimit = response.status === 429 || /RESOURCE_EXHAUSTED|Quota|exhausted|rate limit|429/i.test(data.warnings?.[0] || '');
              if(isRateLimit){
                 throw new Error('RateLimit');
              }
@@ -137,11 +136,11 @@ export const useOcrStore = create<OcrState>((set, get) => ({
           if (err.message === 'RateLimit' && attempt < maxAttempts - 1) {
             attempt++;
             
-            // Reintento exponencial (10s, 20s, 30s...) que garantice limpiar la ventana de RPM
-            const backoffTime = 10000 * attempt;
+            const waitTime = attempt * 15; // Aumentamos un poco el tiempo de espera (15, 30, 45...)
+            const backoffTime = waitTime * 1000;
             
             set(s => ({
-              files: s.files.map(f => f.id === file.id ? { ...f, errorMessage: `Tranquila mi ciela. La IA se saturó un poquito. Esperando ${attempt * 10} segundos para el reintento ${attempt}/${maxAttempts - 1}...` } : f)
+              files: s.files.map(f => f.id === file.id ? { ...f, errorMessage: `Ayy no. La IA está a mil. Esperando ${waitTime} segunditos para volver a intentar (Intento ${attempt}/${maxAttempts - 1})...` } : f)
             }));
             
             await new Promise(res => setTimeout(res, backoffTime));
@@ -149,9 +148,9 @@ export const useOcrStore = create<OcrState>((set, get) => ({
           }
           
           set(s => ({
-            files: s.files.map(f => f.id === file.id ? { ...f, status: 'error', errorMessage: err.message === 'RateLimit' ? 'Límite de la IA alcanzado por completo hoy. ¡Volvé mañana o intentá de a uno! ' : err.message } : f)
+            files: s.files.map(f => f.id === file.id ? { ...f, status: 'error', errorMessage: err.message === 'RateLimit' ? 'Límite de la IA alcanzado. ¡La cuota gratuita se agotó! Intentá de nuevo en un rato o con menos fotos.' : err.message } : f)
           }));
-          break; // Rompe el while si falla definitivamente
+          break;
         }
       }
 

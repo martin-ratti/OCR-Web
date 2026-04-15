@@ -39,10 +39,14 @@ export class OcrController {
       res.status(200).json(responseBody);
     } catch (error: any) {
       console.error("[OCR Controller] Falló extracción:", error.message);
-      res.status(500).json({
+      
+      const isRateLimit = error.status === 429 || /429|RESOURCE_EXHAUSTED|quota/i.test(error.message);
+      const statusCode = isRateLimit ? 429 : 500;
+
+      res.status(statusCode).json({
         status: "error",
         text: "",
-        warnings: [error.message]
+        warnings: [error.message || "Error desconocido en el motor OCR"]
       } as IExtractResponse);
     }
   };

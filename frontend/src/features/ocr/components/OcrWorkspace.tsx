@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import { useOcrStore } from '../../../store/useOcrStore';
+import { KawaiiModal } from './KawaiiModal';
 import { Save, Copy, CheckCircle2, CircleDashed, Eraser, Trash2, Camera, HeartPulse, Sparkles, Coffee, FileText, Files } from 'lucide-react';
 
 import pandaImg from '../../../assets/panda.png';
@@ -6,6 +8,7 @@ import monkeyImg from '../../../assets/monkey.png';
 
 export function OcrWorkspace() {
   const { files, activeFileId, globalStatus, updateFileResult, setActiveFile, processAll, clearAll } = useOcrStore();
+  const [showConfirmClear, setShowConfirmClear] = useState(false);
 
   const activeFile = files.find(f => f.id === activeFileId);
 
@@ -62,7 +65,7 @@ export function OcrWorkspace() {
           </button>
           
           <button 
-            onClick={clearAll} 
+            onClick={() => setShowConfirmClear(true)} 
             className="btn-bounce flex items-center gap-2 bg-white text-rose-500 px-4 py-2.5 rounded-full font-bold hover:bg-rose-50 border-2 border-rose-100 transition-colors"
           >
             <Trash2 className="w-4 h-4" />
@@ -171,7 +174,7 @@ export function OcrWorkspace() {
              </div>
              <textarea 
                className="w-full h-full resize-none outline-none text-slate-800 font-medium text-[16px] custom-scrollbar placeholder:text-zinc-400 agenda-paper pl-[80px] pt-[60px] pr-5"
-               value={activeFile?.resultText || activeFile?.errorMessage || (activeFile?.status === 'idle' ? "Mi ciela, acá va a aparecer todo tipeado como en los mismísimos renglones de tu agenda ✨\n\nPresioná '¡DALAAAA!' para que todo suceda." : "")}
+               value={activeFile?.resultText || activeFile?.errorMessage || (activeFile?.status === 'idle' ? "Mi ciela, acá va a aparecer todo tipeado como en los mismísimos renglones de tu agenda.\n\nPresioná '¡DALAAAA!' para que todo suceda." : "")}
                readOnly
                placeholder="¡Acá va a aparecer la data!"
              />
@@ -180,6 +183,20 @@ export function OcrWorkspace() {
 
       </div>
       </div>
+
+      <KawaiiModal 
+        isOpen={showConfirmClear}
+        onClose={() => setShowConfirmClear(false)}
+        onConfirm={() => {
+          clearAll();
+          setShowConfirmClear(false);
+        }}
+        title="¿Vaciamos todo?"
+        description="Se van a borrar todas las imágenes y el texto que extrajimos. ¡Ojo que no hay vuelta atrás!"
+        confirmText="Sip, borralo"
+        cancelText="Nopi, dejalo"
+        variant="danger"
+      />
     </div>
   );
 }
