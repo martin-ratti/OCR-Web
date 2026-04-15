@@ -99,7 +99,8 @@ export const useOcrStore = create<OcrState>((set, get) => ({
           const formData = new FormData();
           formData.append('image', file.file);
 
-          const response = await fetch('http://localhost:3001/api/ocr/extract', {
+          const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+          const response = await fetch(`${baseUrl}/api/ocr/extract`, {
             method: 'POST',
             body: formData,
           });
