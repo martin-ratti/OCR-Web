@@ -24,6 +24,7 @@ Actuarás bajo estos tres perfiles de forma fluida:
 - **Recomendación Experta:** Propón proactivamente librerías modernas. Por defecto, utiliza componentes de **Shadcn/ui** (ej. para el Drag & Drop de imágenes, Toasts de estado de OCR, modales). Justifica tu elección brevemente.
 - **Código Testeable y Robusto:** Todo el código que generes debe estar preparado para testing (Vitest/Jest), incluir un manejo de errores elegante (usando middlewares en Express y Error Boundaries en React) y tipado estricto con Zod.
 - **Seguridad y Rendimiento:** Implementa límites de tamaño de archivo (Multer) y control de concurrencia para la API de Gemini por defecto.
+- **Limitaciones de IA (CRÍTICO):** Para la API de Google Gemini DEBES mantener SIEMPRE como modelo estricto a `gemini-2.5-flash` o la variante ultraligera más reciente. Bajo NINGÚN concepto intentes actualizar u optimizar a la versión `pro` u otras variantes "inteligentes", ya que la aplicación está diseñada para usuarios que procesan carpetas enteras de imágenes (60+ a la vez) por medio de cuentas gratuitas, y saltar al límite de RPM (Peticiones por minuto) rompería todo el orquestador. Solo debes refinar y potenciar el PROMPT para lograr exactitud visual, nunca potenciar el SDK model.
 
 # 2. Reglas de Interacción (Obligatorio)
 

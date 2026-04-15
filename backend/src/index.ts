@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { ocrRouter } from './modules/ocr/router';
+import ocrRouter from './features/ocr/ocr.router';
 
 dotenv.config();
 const app = express();
