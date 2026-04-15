@@ -12,5 +12,6 @@ app.use('/api/ocr', ocrRouter);
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-    console.log(\[Server] Escuchando en http://localhost:\\);
+    // Aquí estaba el error por falta de comillas invertidas (backticks)
+    console.log(`[Server] Escuchando en http://localhost:${PORT}`);
 });
