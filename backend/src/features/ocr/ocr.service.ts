@@ -23,7 +23,11 @@ export class GeminiOcrAdapter implements OcrAdapter {
         HIGHLIGHT_EXTRACTION_PROMPT,
         { inlineData: { data: imageBuffer.toString('base64'), mimeType } },
       ],
-      config: { temperature: 0.1 },
+      config: {
+        temperature: 0,
+        topP: 0.1,
+        thinkingConfig: { thinkingBudget: 1024 },
+      },
     });
     return response.text ? response.text.trim() : '';
   }
