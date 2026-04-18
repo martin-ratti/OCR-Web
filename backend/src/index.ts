@@ -1,24 +1,43 @@
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
+import helmet from 'helmet';
+import { env } from './config/env';
+import { logger } from './config/logger';
 import ocrRouter from './features/ocr/ocr.router';
+import { errorHandler } from './middlewares/errorHandler';
+import { globalLimiter } from './middlewares/rateLimit';
 
-dotenv.config();
 const app = express();
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-app.use(express.json());
 
-app.get('/health', (req, res) => {
+app.set('trust proxy', 1);
+
+app.use(helmet());
+
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      if (env.ALLOWED_ORIGINS.includes('*') || env.ALLOWED_ORIGINS.includes(origin)) {
+        return cb(null, true);
+      }
+      return cb(new Error(`Origin ${origin} not allowed by CORS`));
+    },
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  })
+);
+
+app.use(express.json({ limit: '100kb' }));
+app.use(globalLimiter);
+
+app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 app.use('/api/ocr', ocrRouter);
 
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-    console.log(`[Server] Escuchando en http://localhost:${PORT}`);
+app.use(errorHandler);
+
+app.listen(env.PORT, () => {
+  logger.info(`[Server] Listening on http://localhost:${env.PORT} (env=${env.NODE_ENV})`);
 });

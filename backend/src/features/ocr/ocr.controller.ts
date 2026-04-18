@@ -1,53 +1,28 @@
-import { Request, Response, NextFunction } from "express";
-import { OcrService } from "./ocr.service";
-import { IExtractResponse } from "./ocr.schema";
+import { Request, Response, NextFunction } from 'express';
+import { OcrService } from './ocr.service';
+import { ExtractResponse } from './ocr.schema';
+import { HttpError } from '../../middlewares/errorHandler';
+import { logger } from '../../config/logger';
 
 export class OcrController {
-  private ocrService: OcrService;
+  constructor(private readonly ocrService: OcrService = new OcrService()) {}
 
-  constructor() {
-    this.ocrService = new OcrService();
-  }
-
-  /**
-   * Controlador para el endpoint encargado de recibir Form Data y enviarlo a Gemini
-   */
-  public extractText = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  extractText = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      // Multer almacena la imagen en memoria en req.file
       if (!req.file) {
-        res.status(400).json({
-          status: "error",
-          text: "",
-          warnings: ["No se subió ninguna imagen. Asegúrate de enviar Form-Data con el campo 'image'."]
-        } as IExtractResponse);
-        return;
+        throw new HttpError(400, "No se subió ninguna imagen. Enviá Form-Data con el campo 'image'.");
       }
 
-      console.log(`[OCR Controller] Procesando archivo: ${req.file.originalname} (${req.file.mimetype}) - ${req.file.size} bytes`);
-
-      const textResult = await this.ocrService.extractTextFromBuffer(
-        req.file.buffer,
-        req.file.mimetype
+      logger.info(
+        `[OCR] File=${req.file.originalname} Mime=${req.file.mimetype} Size=${req.file.size}B`
       );
 
-      const responseBody: IExtractResponse = {
-        status: "success",
-        text: textResult
-      };
+      const text = await this.ocrService.extractTextFromBuffer(req.file.buffer, req.file.mimetype);
 
-      res.status(200).json(responseBody);
-    } catch (error: any) {
-      console.error("[OCR Controller] Falló extracción:", error.message);
-      
-      const isRateLimit = error.status === 429 || /429|RESOURCE_EXHAUSTED|quota/i.test(error.message);
-      const statusCode = isRateLimit ? 429 : 500;
-
-      res.status(statusCode).json({
-        status: "error",
-        text: "",
-        warnings: [error.message || "Error desconocido en el motor OCR"]
-      } as IExtractResponse);
+      const body: ExtractResponse = { status: 'success', text };
+      res.status(200).json(body);
+    } catch (err) {
+      next(err);
     }
   };
 }

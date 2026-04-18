@@ -1,31 +1,159 @@
 import { create } from 'zustand';
+import { ExtractResponseSchema } from '../shared/schema';
+import { getApiBase, isRateLimitMessage } from '../shared/api';
+import { downscaleImage } from '../lib/imageDownscale';
 
 export type OcrStatus = 'idle' | 'processing' | 'success' | 'error';
 
 export interface OcrFile {
-  id: string; // ID único para react keys
+  id: string;
   file: File;
-  previewUrl: string; // Creado con URL.createObjectURL()
+  previewUrl: string;
   status: OcrStatus;
   resultText?: string;
   errorMessage?: string;
+  infoMessage?: string;
 }
 
 interface OcrState {
   files: OcrFile[];
   activeFileId: string | null;
   globalStatus: 'idle' | 'working' | 'done';
-  globalProgress: number; // 0 a 100
+  globalProgress: number;
 
-  // Actions
   addFiles: (files: File[]) => void;
   setActiveFile: (id: string) => void;
   removeFile: (id: string) => void;
   clearAll: () => void;
-  
-  // OCR Actions
+
   processAll: () => Promise<void>;
+  processOne: (id: string) => Promise<void>;
+  cancel: () => void;
   updateFileResult: (id: string, text: string) => void;
+}
+
+const MAX_FILES = 200;
+const INTER_FILE_DELAY_MS = 5000;
+const MAX_ATTEMPTS = 5;
+
+let abortController: AbortController | null = null;
+let cancelled = false;
+
+async function extractOneWithRetries(
+  store: OcrState,
+  setState: (fn: (s: OcrState) => Partial<OcrState>) => void,
+  fileId: string,
+  signal: AbortSignal
+): Promise<void> {
+  const target = store.files.find((f) => f.id === fileId);
+  if (!target) return;
+
+  setState((s) => ({
+    files: s.files.map((f) =>
+      f.id === fileId
+        ? { ...f, status: 'processing', errorMessage: undefined, infoMessage: undefined }
+        : f
+    ),
+  }));
+
+  const compressed = await downscaleImage(target.file);
+
+  let attempt = 0;
+  while (attempt < MAX_ATTEMPTS) {
+    if (signal.aborted) return;
+
+    try {
+      const formData = new FormData();
+      formData.append('image', compressed, compressed.name);
+
+      const res = await fetch(`${getApiBase()}/api/ocr/extract`, {
+        method: 'POST',
+        body: formData,
+        signal,
+      });
+
+      const rawJson = await res.json().catch(() => null);
+      const parsed = rawJson ? ExtractResponseSchema.safeParse(rawJson) : null;
+      const body = parsed?.success ? parsed.data : null;
+
+      if (!res.ok || body?.status === 'error') {
+        const errMsg = body?.warnings?.[0] ?? res.statusText ?? 'Error desconocido';
+        const rateLimit = res.status === 429 || res.status === 503 || isRateLimitMessage(errMsg);
+        if (rateLimit) throw new Error('RateLimit');
+        throw new Error(errMsg);
+      }
+
+      if (!body) throw new Error('Respuesta inválida del servidor');
+
+      setState((s) => ({
+        files: s.files.map((f) =>
+          f.id === fileId
+            ? {
+                ...f,
+                status: 'success',
+                resultText: body.text,
+                errorMessage: undefined,
+                infoMessage: undefined,
+              }
+            : f
+        ),
+      }));
+      return;
+    } catch (err: unknown) {
+      if (signal.aborted) return;
+
+      const e = err as Error;
+      if (e.name === 'AbortError') return;
+
+      attempt++;
+      const isRate = e.message === 'RateLimit';
+      const canRetry = attempt < MAX_ATTEMPTS;
+
+      if (!canRetry) {
+        setState((s) => ({
+          files: s.files.map((f) =>
+            f.id === fileId
+              ? {
+                  ...f,
+                  status: 'error',
+                  errorMessage: isRate
+                    ? 'Límite de la IA alcanzado. La cuota gratuita se agotó. Probá más tarde.'
+                    : e.message || 'Error desconocido',
+                  infoMessage: undefined,
+                }
+              : f
+          ),
+        }));
+        return;
+      }
+
+      const waitSec = isRate ? attempt * 15 : attempt * 3;
+      setState((s) => ({
+        files: s.files.map((f) =>
+          f.id === fileId
+            ? {
+                ...f,
+                infoMessage: isRate
+                  ? `La IA está a mil. Esperando ${waitSec}s (intento ${attempt}/${MAX_ATTEMPTS - 1})...`
+                  : `Reintentando en ${waitSec}s (intento ${attempt}/${MAX_ATTEMPTS - 1})...`,
+              }
+            : f
+        ),
+      }));
+
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, waitSec * 1000);
+        signal.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(t);
+            reject(new DOMException('aborted', 'AbortError'));
+          },
+          { once: true }
+        );
+      }).catch(() => {});
+    }
+  }
 }
 
 export const useOcrStore = create<OcrState>((set, get) => ({
@@ -35,135 +163,108 @@ export const useOcrStore = create<OcrState>((set, get) => ({
   globalProgress: 0,
 
   addFiles: (newFiles) => {
-    const ocrFiles: OcrFile[] = newFiles.map(f => ({
-      id: crypto.randomUUID(),
-      file: f,
-      previewUrl: URL.createObjectURL(f),
-      status: 'idle'
-    }));
+    set((state) => {
+      const remainingSlots = MAX_FILES - state.files.length;
+      const accepted = newFiles.slice(0, Math.max(0, remainingSlots));
 
-    set(state => {
-      const updatedFiles = [...state.files, ...ocrFiles];
-      return { 
-        files: updatedFiles,
-        // Auto select the first newly added file if none active
-        activeFileId: state.activeFileId || (ocrFiles.length > 0 ? ocrFiles[0].id : null)
+      const ocrFiles: OcrFile[] = accepted.map((f) => ({
+        id: crypto.randomUUID(),
+        file: f,
+        previewUrl: URL.createObjectURL(f),
+        status: 'idle',
+      }));
+
+      const updated = [...state.files, ...ocrFiles];
+      return {
+        files: updated,
+        activeFileId: state.activeFileId || ocrFiles[0]?.id || null,
+        globalStatus: 'idle',
+        globalProgress: 0,
       };
     });
   },
 
   setActiveFile: (id) => set({ activeFileId: id }),
 
-  removeFile: (id) => set(state => {
-    const fileToRemove = state.files.find(f => f.id === id);
-    if (fileToRemove) URL.revokeObjectURL(fileToRemove.previewUrl);
-    
-    const newFiles = state.files.filter(f => f.id !== id);
-    return {
-      files: newFiles,
-      activeFileId: state.activeFileId === id ? (newFiles[0]?.id || null) : state.activeFileId
-    };
-  }),
+  removeFile: (id) =>
+    set((state) => {
+      const toRemove = state.files.find((f) => f.id === id);
+      if (toRemove) URL.revokeObjectURL(toRemove.previewUrl);
 
-  clearAll: () => set(state => {
-    state.files.forEach(f => URL.revokeObjectURL(f.previewUrl));
-    return { files: [], activeFileId: null, globalStatus: 'idle', globalProgress: 0 };
-  }),
+      const remaining = state.files.filter((f) => f.id !== id);
+      return {
+        files: remaining,
+        activeFileId:
+          state.activeFileId === id ? remaining[0]?.id ?? null : state.activeFileId,
+      };
+    }),
 
-  updateFileResult: (id, text) => set(state => ({
-    files: state.files.map(f => f.id === id ? { ...f, resultText: text, status: 'success' } : f)
-  })),
+  clearAll: () => {
+    cancelled = true;
+    abortController?.abort();
+    abortController = null;
+    set((state) => {
+      state.files.forEach((f) => URL.revokeObjectURL(f.previewUrl));
+      return {
+        files: [],
+        activeFileId: null,
+        globalStatus: 'idle',
+        globalProgress: 0,
+      };
+    });
+  },
+
+  updateFileResult: (id, text) =>
+    set((state) => ({
+      files: state.files.map((f) => (f.id === id ? { ...f, resultText: text } : f)),
+    })),
+
+  cancel: () => {
+    cancelled = true;
+    abortController?.abort();
+    abortController = null;
+    set({ globalStatus: 'done' });
+  },
+
+  processOne: async (id) => {
+    abortController = new AbortController();
+    cancelled = false;
+    set({ globalStatus: 'working' });
+    const state = get();
+    await extractOneWithRetries(state, set as never, id, abortController.signal);
+    if (!cancelled) set({ globalStatus: 'done' });
+  },
 
   processAll: async () => {
     const state = get();
-    const filesToProcess = state.files.filter(f => f.status === 'idle' || f.status === 'error');
-    if (filesToProcess.length === 0) return;
+    const toProcess = state.files.filter((f) => f.status === 'idle' || f.status === 'error');
+    if (toProcess.length === 0) return;
+
+    abortController = new AbortController();
+    cancelled = false;
+    const { signal } = abortController;
 
     set({ globalStatus: 'working', globalProgress: 0 });
 
-    let processedCount = 0;
+    for (let i = 0; i < toProcess.length; i++) {
+      if (signal.aborted || cancelled) break;
 
-    for (let i = 0; i < filesToProcess.length; i++) {
-      const file = filesToProcess[i];
-      
-      set(s => ({
-        files: s.files.map(f => f.id === file.id ? { ...f, status: 'processing' } : f)
-      }));
+      await extractOneWithRetries(get(), set as never, toProcess[i].id, signal);
 
-      let attempt = 0;
-      const maxAttempts = 5; // Aumentado a 5 reintentos
-      let success = false;
+      const processedCount = i + 1;
+      set({ globalProgress: Math.round((processedCount / toProcess.length) * 100) });
 
-      while (attempt < maxAttempts && !success) {
-        try {
-          const formData = new FormData();
-          formData.append('image', file.file);
-
-          const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:3001';
-          const response = await fetch(`${baseUrl}/api/ocr/extract`, {
-            method: 'POST',
-            body: formData,
-          });
-
-          if (!response.ok) {
-            const errData = await response.json().catch(() => null);
-            const errMsg = errData?.warnings?.[0] || response.statusText;
-            
-            const isRateLimit = response.status === 429 || response.status === 503 || 
-                                /RESOURCE_EXHAUSTED|Quota|exhausted|rate limit|429/i.test(errMsg);
-                                
-            if (isRateLimit) {
-               throw new Error('RateLimit');
-            }
-            throw new Error(`Error HTTP: ${errMsg}`);
-          }
-
-          const data = await response.json();
-          
-          if (data.status === 'error') {
-             const isRateLimit = response.status === 429 || /RESOURCE_EXHAUSTED|Quota|exhausted|rate limit|429/i.test(data.warnings?.[0] || '');
-             if(isRateLimit){
-                throw new Error('RateLimit');
-             }
-             throw new Error(data.warnings?.[0] || 'Unknown error');
-          }
-
-          set(s => ({
-            files: s.files.map(f => f.id === file.id ? { ...f, status: 'success', resultText: data.text, errorMessage: undefined } : f)
-          }));
-          success = true;
-
-        } catch (err: any) {
-          if (err.message === 'RateLimit' && attempt < maxAttempts - 1) {
-            attempt++;
-            
-            const waitTime = attempt * 15; // Aumentamos un poco el tiempo de espera (15, 30, 45...)
-            const backoffTime = waitTime * 1000;
-            
-            set(s => ({
-              files: s.files.map(f => f.id === file.id ? { ...f, errorMessage: `Ayy no. La IA está a mil. Esperando ${waitTime} segunditos para volver a intentar (Intento ${attempt}/${maxAttempts - 1})...` } : f)
-            }));
-            
-            await new Promise(res => setTimeout(res, backoffTime));
-            continue;
-          }
-          
-          set(s => ({
-            files: s.files.map(f => f.id === file.id ? { ...f, status: 'error', errorMessage: err.message === 'RateLimit' ? 'Límite de la IA alcanzado. ¡La cuota gratuita se agotó! Intentá de nuevo en un rato o con menos fotos.' : err.message } : f)
-          }));
-          break;
-        }
+      if (i < toProcess.length - 1 && !signal.aborted) {
+        await new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, INTER_FILE_DELAY_MS);
+          signal.addEventListener('abort', () => {
+            clearTimeout(t);
+            resolve();
+          }, { once: true });
+        });
       }
-
-      // Si quedan archivos por procesar, aguardamos 6 segundos para respetar el límite de 15 RPM y evitar error (Pide paciencia)
-      if(i < filesToProcess.length - 1) {
-         await new Promise(res => setTimeout(res, 6000));
-      }
-
-      processedCount++;
-      set({ globalProgress: Math.round((processedCount / filesToProcess.length) * 100) });
     }
 
     set({ globalStatus: 'done' });
-  }
+  },
 }));
