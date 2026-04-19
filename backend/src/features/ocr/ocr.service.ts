@@ -31,7 +31,10 @@ export interface OcrAdapter {
 export class GeminiOcrAdapter implements OcrAdapter {
   private ai: GoogleGenAI;
 
-  constructor(apiKey: string = env.GEMINI_API_KEY) {
+  constructor(apiKey: string | undefined = env.GEMINI_API_KEY) {
+    if (!apiKey) {
+      throw new Error('GEMINI_API_KEY no configurada. Usá el motor Tesseract o agregá la key en backend/.env.');
+    }
     this.ai = new GoogleGenAI({ apiKey, apiVersion: 'v1' });
   }
 
@@ -150,13 +153,23 @@ function normalizeRotation(deg: number): number {
 }
 
 export class OcrService {
-  private readonly adapters: Record<OcrEngine, OcrAdapter>;
+  private readonly overrides: Partial<Record<OcrEngine, OcrAdapter>>;
+  private geminiAdapter: OcrAdapter | null = null;
+  private tesseractAdapter: OcrAdapter | null = null;
 
   constructor(adapters?: Partial<Record<OcrEngine, OcrAdapter>>) {
-    this.adapters = {
-      gemini: adapters?.gemini ?? new GeminiOcrAdapter(),
-      tesseract: adapters?.tesseract ?? new TesseractOcrAdapter(),
-    };
+    this.overrides = adapters ?? {};
+  }
+
+  private getAdapter(engine: OcrEngine): OcrAdapter {
+    if (engine === 'gemini') {
+      if (this.overrides.gemini) return this.overrides.gemini;
+      if (!this.geminiAdapter) this.geminiAdapter = new GeminiOcrAdapter();
+      return this.geminiAdapter;
+    }
+    if (this.overrides.tesseract) return this.overrides.tesseract;
+    if (!this.tesseractAdapter) this.tesseractAdapter = new TesseractOcrAdapter();
+    return this.tesseractAdapter;
   }
 
   async extractTextFromBuffer(
@@ -165,7 +178,7 @@ export class OcrService {
     engine: OcrEngine = 'gemini',
   ): Promise<string> {
     try {
-      return await this.adapters[engine].extractText(imageBuffer, mimeType);
+      return await this.getAdapter(engine).extractText(imageBuffer, mimeType);
     } catch (error) {
       logger.error(`[OcrService][${engine}]`, error);
       throw error;

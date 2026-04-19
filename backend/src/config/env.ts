@@ -4,7 +4,7 @@ import { z } from 'zod';
 dotenv.config();
 
 const EnvSchema = z.object({
-  GEMINI_API_KEY: z.string().min(1, 'GEMINI_API_KEY is required'),
+  GEMINI_API_KEY: z.string().min(1).optional(),
   PORT: z.coerce.number().int().positive().default(3001),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   ALLOWED_ORIGINS: z
