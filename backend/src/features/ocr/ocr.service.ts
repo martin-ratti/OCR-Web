@@ -1,5 +1,7 @@
+import path from 'node:path';
+import fs from 'node:fs';
 import { GoogleGenAI } from '@google/genai';
-import Tesseract from 'tesseract.js';
+import Tesseract, { createWorker, type Worker } from 'tesseract.js';
 import sharp from 'sharp';
 import { env } from '../../config/env';
 import { HIGHLIGHT_EXTRACTION_PROMPT, NO_HIGHLIGHT_SENTINEL } from '../../config/prompt';
@@ -11,6 +13,16 @@ const MODEL_ID = 'gemini-2.5-flash-lite';
 const TESSERACT_LANGS = 'spa+eng';
 const OSD_DETECT_WIDTH = 1000;
 const OCR_RETRY_CONFIDENCE = 55;
+
+const TESSERACT_CACHE_DIR = path.join(process.cwd(), 'node_modules', '.cache', 'tesseract');
+if (!fs.existsSync(TESSERACT_CACHE_DIR)) {
+  fs.mkdirSync(TESSERACT_CACHE_DIR, { recursive: true });
+}
+const TESSERACT_WORKER_OPTIONS = {
+  cachePath: TESSERACT_CACHE_DIR,
+  cacheMethod: 'readWrite' as const,
+  gzip: true,
+};
 
 export interface OcrAdapter {
   extractText(imageBuffer: Buffer, mimeType: string): Promise<string>;
@@ -40,6 +52,34 @@ export class GeminiOcrAdapter implements OcrAdapter {
   }
 }
 
+let recognizeWorker: Promise<Worker> | null = null;
+let osdWorker: Promise<Worker> | null = null;
+
+async function getRecognizeWorker(): Promise<Worker> {
+  if (!recognizeWorker) {
+    recognizeWorker = createWorker(['spa', 'eng'], 1, TESSERACT_WORKER_OPTIONS).catch((err) => {
+      recognizeWorker = null;
+      throw err;
+    });
+  }
+  return recognizeWorker;
+}
+
+async function getOsdWorker(): Promise<Worker> {
+  if (!osdWorker) {
+    osdWorker = createWorker('osd', Tesseract.OEM.TESSERACT_ONLY, TESSERACT_WORKER_OPTIONS)
+      .then(async (w) => {
+        await w.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.OSD_ONLY });
+        return w;
+      })
+      .catch((err) => {
+        osdWorker = null;
+        throw err;
+      });
+  }
+  return osdWorker;
+}
+
 export class TesseractOcrAdapter implements OcrAdapter {
   async extractText(imageBuffer: Buffer, _mimeType: string): Promise<string> {
     const oriented = await sharp(imageBuffer).rotate().toBuffer();
@@ -57,13 +97,14 @@ export class TesseractOcrAdapter implements OcrAdapter {
       return NO_HIGHLIGHT_SENTINEL;
     }
 
-    const first = await Tesseract.recognize(png, TESSERACT_LANGS);
+    const worker = await getRecognizeWorker();
+    const first = await worker.recognize(png);
     let text = (first.data.text ?? '').trim();
     let confidence = first.data.confidence ?? 0;
 
     if (confidence < OCR_RETRY_CONFIDENCE) {
       const flipped = await sharp(png).rotate(180).toBuffer();
-      const retry = await Tesseract.recognize(flipped, TESSERACT_LANGS);
+      const retry = await worker.recognize(flipped);
       const retryConf = retry.data.confidence ?? 0;
       logger.info(`[Tesseract] low-conf retry ${confidence.toFixed(1)} → ${retryConf.toFixed(1)}`);
       if (retryConf > confidence) {
@@ -82,7 +123,8 @@ async function detectTextRotation(imageBuffer: Buffer): Promise<number> {
       .resize({ width: OSD_DETECT_WIDTH, withoutEnlargement: true })
       .jpeg({ quality: 85 })
       .toBuffer();
-    const result: unknown = await Tesseract.detect(small);
+    const worker = await getOsdWorker();
+    const result = await worker.detect(small);
     const deg = extractOrientationDegrees(result);
     return normalizeRotation(deg);
   } catch (err) {
