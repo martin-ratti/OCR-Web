@@ -3,27 +3,18 @@ import { toast } from 'sonner';
 import JSZip from 'jszip';
 import { useOcrStore } from '../../../store/useOcrStore';
 import { KawaiiModal } from './KawaiiModal';
+import { OriginalViewer } from './OriginalViewer';
+import { ExtractedEditor } from './ExtractedEditor';
+import { ExportToolbar } from './ExportToolbar';
+import { QueueSidebar } from './QueueSidebar';
 import {
-  Save,
-  Copy,
-  CheckCircle2,
-  CircleDashed,
-  AlignLeft,
-  Trash2,
-  Camera,
   HeartPulse,
   Sparkles,
-  Coffee,
-  FileText,
-  Files,
-  RefreshCw,
-  XCircle,
-  Package,
-  AlertTriangle,
   Cpu,
-  ImageIcon,
+  Package,
   ScanLine,
-  Play,
+  Trash2,
+  XCircle,
 } from 'lucide-react';
 import {
   Select,
@@ -35,10 +26,13 @@ import {
 import { Progress } from '@/components/ui/progress';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Badge } from '@/components/ui/badge';
-import { Separator } from '@/components/ui/separator';
 
 import pandaImg from '../../../assets/panda.png';
 import monkeyImg from '../../../assets/monkey.png';
+
+const MIN_FONT = 12;
+const MAX_FONT = 28;
+const DEFAULT_FONT = 16;
 
 function cleanParagraphs(input: string): string {
   return input.replace(/(?<!\n)\n(?!\n)/g, ' ');
@@ -61,12 +55,15 @@ export function OcrWorkspace() {
     setSelectedEngine,
   } = useOcrStore();
   const [showConfirmClear, setShowConfirmClear] = useState(false);
+  const [fontSize, setFontSize] = useState(DEFAULT_FONT);
 
   const activeFile = files.find((f) => f.id === activeFileId);
   const working = globalStatus === 'working';
   const successCount = files.filter((f) => f.status === 'success').length;
   const errorCount = files.filter((f) => f.status === 'error').length;
   const pendingCount = files.filter((f) => f.status === 'idle').length;
+  const processingCount = files.filter((f) => f.status === 'processing').length;
+  const canEditorAct = !!activeFile?.resultText;
 
   const handleCleanFormat = () => {
     if (!activeFile?.resultText) return;
@@ -74,13 +71,15 @@ export function OcrWorkspace() {
     toast.success('Párrafos ordenados');
   };
 
-  const handleCopy = async () => {
-    if (!activeFile?.resultText) return;
+  const handleCopy = async (): Promise<boolean> => {
+    if (!activeFile?.resultText) return false;
     try {
       await navigator.clipboard.writeText(activeFile.resultText);
       toast.success('Texto copiado');
+      return true;
     } catch {
       toast.error('No se pudo copiar al portapapeles');
+      return false;
     }
   };
 
@@ -120,9 +119,9 @@ export function OcrWorkspace() {
     toast.success(`${done.length} apunte(s) exportado(s)`);
   };
 
-  const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+  const handleEditorChange = (text: string) => {
     if (!activeFile) return;
-    updateFileResult(activeFile.id, e.target.value);
+    updateFileResult(activeFile.id, text);
   };
 
   return (
@@ -234,53 +233,16 @@ export function OcrWorkspace() {
             </Tooltip>
           </div>
 
-          <div
-            className="flex items-center gap-1 bg-white p-1 rounded-full border-2 border-pink-100 shadow-sm"
-            role="toolbar"
-            aria-label="Acciones sobre el texto extraído"
-          >
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  onClick={handleCleanFormat}
-                  disabled={!activeFile?.resultText}
-                  aria-label="Ordenar párrafos"
-                  className="btn-bounce p-2.5 rounded-full text-zinc-400 hover:text-emerald-500 hover:bg-emerald-50 disabled:opacity-30 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
-                >
-                  <AlignLeft className="w-5 h-5" aria-hidden />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Ordenar párrafos</TooltipContent>
-            </Tooltip>
-            <Separator orientation="vertical" className="h-6 bg-pink-100" />
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  onClick={handleCopy}
-                  disabled={!activeFile?.resultText}
-                  aria-label="Copiar texto"
-                  className="btn-bounce p-2.5 rounded-full text-zinc-400 hover:text-pink-500 hover:bg-pink-50 disabled:opacity-30 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-200"
-                >
-                  <Copy className="w-5 h-5" aria-hidden />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Copiar al portapapeles</TooltipContent>
-            </Tooltip>
-            <Separator orientation="vertical" className="h-6 bg-pink-100" />
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  onClick={handleSave}
-                  disabled={!activeFile?.resultText}
-                  aria-label="Guardar como TXT"
-                  className="btn-bounce p-2.5 rounded-full text-zinc-400 hover:text-indigo-500 hover:bg-indigo-50 disabled:opacity-30 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-200"
-                >
-                  <Save className="w-5 h-5" aria-hidden />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Guardar como .txt</TooltipContent>
-            </Tooltip>
-          </div>
+          <ExportToolbar
+            canAct={canEditorAct}
+            fontSize={fontSize}
+            minFontSize={MIN_FONT}
+            maxFontSize={MAX_FONT}
+            onCleanFormat={handleCleanFormat}
+            onCopy={handleCopy}
+            onSave={handleSave}
+            onFontSizeChange={setFontSize}
+          />
         </div>
 
         {working && (
@@ -292,8 +254,8 @@ export function OcrWorkspace() {
             <div className="flex items-center justify-between text-xs font-extrabold text-pink-600 mb-1.5">
               <span className="inline-flex items-center gap-1.5">
                 <ScanLine className="w-3.5 h-3.5 motion-safe:animate-pulse" aria-hidden />
-                Procesando {files.filter((f) => f.status === 'processing').length || '—'} /{' '}
-                {pendingCount + errorCount + files.filter((f) => f.status === 'processing').length}
+                Procesando {processingCount || '—'} /{' '}
+                {pendingCount + errorCount + processingCount}
               </span>
               <span>{globalProgress}%</span>
             </div>
@@ -306,206 +268,26 @@ export function OcrWorkspace() {
         )}
 
         <div className="flex flex-col md:flex-row flex-1 min-h-0 bg-transparent">
-          <aside
-            className="w-full md:w-72 border-b-2 md:border-b-0 md:border-r-2 border-pink-100 bg-white/60 p-3 overflow-y-auto flex flex-col gap-2 max-h-56 md:max-h-none"
-            aria-label="Cola de imágenes"
-          >
-            <div className="sticky top-0 pb-2 mb-2 border-b-2 border-pink-100 bg-white/90 z-10 font-black text-[12px] text-pink-400 uppercase flex items-center justify-between px-2 gap-2">
-              <span className="flex items-center gap-1">
-                <Files className="w-3.5 h-3.5" aria-hidden /> La data
-              </span>
-              <div className="flex items-center gap-1">
-                {successCount > 0 && (
-                  <Badge className="bg-emerald-100 text-emerald-700 border-0 hover:bg-emerald-100">
-                    <CheckCircle2 className="w-3 h-3 mr-1" aria-hidden />
-                    {successCount}
-                  </Badge>
-                )}
-                {errorCount > 0 && (
-                  <Badge className="bg-rose-100 text-rose-700 border-0 hover:bg-rose-100">
-                    <AlertTriangle className="w-3 h-3 mr-1" aria-hidden />
-                    {errorCount}
-                  </Badge>
-                )}
-                <Badge className="bg-pink-100 text-pink-600 border-0 hover:bg-pink-100">
-                  {files.length}
-                </Badge>
-              </div>
-            </div>
-            <ul className="flex flex-col gap-2" role="list">
-              {files.map((file) => {
-                const isActive = activeFileId === file.id;
-                return (
-                  <li
-                    key={file.id}
-                    className={`flex items-center gap-2 w-full text-left rounded-2xl transition-all ${
-                      isActive
-                        ? 'bg-pink-100 border-pink-300 border-2 shadow-sm'
-                        : 'hover:bg-pink-50 border-2 border-transparent'
-                    }`}
-                  >
-                    <button
-                      onClick={() => setActiveFile(file.id)}
-                      aria-pressed={isActive}
-                      aria-label={`Seleccionar ${file.file.name}, estado ${file.status}`}
-                      className="flex items-center gap-3 flex-1 text-left p-3 btn-bounce min-w-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-300 rounded-2xl"
-                    >
-                      <div className="shrink-0">
-                        {file.status === 'success' ? (
-                          <CheckCircle2 className="w-6 h-6 text-emerald-400" aria-hidden />
-                        ) : file.status === 'processing' ? (
-                          <CircleDashed
-                            className="w-6 h-6 text-pink-400 motion-safe:animate-spin"
-                            aria-hidden
-                          />
-                        ) : file.status === 'error' ? (
-                          <AlertTriangle className="w-6 h-6 text-rose-400" aria-hidden />
-                        ) : (
-                          <ImageIcon
-                            className={`w-5 h-5 ${
-                              isActive ? 'text-pink-500' : 'text-zinc-300'
-                            }`}
-                            aria-hidden
-                          />
-                        )}
-                      </div>
-                      <span
-                        className={`truncate flex-1 text-sm font-bold ${
-                          isActive
-                            ? 'text-pink-600'
-                            : file.status === 'success'
-                            ? 'text-zinc-700'
-                            : 'text-zinc-400'
-                        }`}
-                      >
-                        {file.file.name}
-                      </span>
-                    </button>
-                    <div className="flex items-center gap-0.5 pr-2">
-                      {file.status === 'error' && (
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <button
-                              onClick={() => processOne(file.id)}
-                              disabled={working}
-                              aria-label={`Reintentar ${file.file.name}`}
-                              className="p-1.5 rounded-full text-zinc-400 hover:text-emerald-500 hover:bg-emerald-50 disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
-                            >
-                              <RefreshCw className="w-4 h-4" aria-hidden />
-                            </button>
-                          </TooltipTrigger>
-                          <TooltipContent>Reintentar</TooltipContent>
-                        </Tooltip>
-                      )}
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <button
-                            onClick={() => removeFile(file.id)}
-                            disabled={working}
-                            aria-label={`Eliminar ${file.file.name}`}
-                            className="p-1.5 rounded-full text-zinc-300 hover:text-rose-500 hover:bg-rose-50 disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200"
-                          >
-                            <Trash2 className="w-4 h-4" aria-hidden />
-                          </button>
-                        </TooltipTrigger>
-                        <TooltipContent>Eliminar</TooltipContent>
-                      </Tooltip>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          </aside>
+          <QueueSidebar
+            files={files}
+            activeFileId={activeFileId}
+            working={working}
+            successCount={successCount}
+            errorCount={errorCount}
+            onSelect={setActiveFile}
+            onRetry={processOne}
+            onRemove={removeFile}
+          />
 
-          <section
-            className="flex-1 p-5 md:border-r-2 border-pink-100 bg-zinc-50 relative flex flex-col min-h-[280px]"
-            aria-label="Vista previa de la imagen"
-          >
-            <Badge className="absolute top-4 left-4 z-10 bg-white text-pink-500 border-2 border-pink-100 shadow-sm rounded-full px-3 py-1 gap-1 hover:bg-white">
-              <Camera className="w-3 h-3" aria-hidden /> Evidencia A
-            </Badge>
-            {activeFile ? (
-              <div className="w-full h-full p-2 flex items-center justify-center">
-                <img
-                  src={activeFile.previewUrl}
-                  alt={`Preview de ${activeFile.file.name}`}
-                  className="max-w-full max-h-full object-contain drop-shadow-md rounded-xl"
-                />
-              </div>
-            ) : (
-              <div className="w-full h-full flex flex-col items-center justify-center text-zinc-300 text-center gap-3">
-                <ImageIcon className="w-16 h-16 text-pink-100" aria-hidden />
-                <span className="font-bold text-pink-200 px-4">
-                  En fin, la hipotenusa. Elegí algo.
-                </span>
-              </div>
-            )}
-          </section>
-
-          <section
-            className="flex-1 flex flex-col relative min-w-0 md:min-w-[40%] bg-pink-50 border-t-2 md:border-t-0 md:border-l border-pink-200 min-h-[280px]"
-            aria-label="Texto extraído"
-          >
-            {activeFile?.status === 'processing' && (
-              <div
-                className="absolute inset-0 bg-white/90 z-20 flex flex-col items-center justify-center gap-4 p-6 text-center"
-                role="status"
-                aria-live="polite"
-              >
-                <CircleDashed
-                  className="w-14 h-14 text-pink-400 motion-safe:animate-spin"
-                  aria-hidden
-                />
-                <p className="font-extrabold text-pink-500 text-lg motion-safe:animate-pulse flex items-center gap-2">
-                  Tranquila negra, procesando... <Coffee className="w-5 h-5" aria-hidden />
-                </p>
-                {activeFile.infoMessage && (
-                  <p className="text-pink-400 font-bold text-sm bg-pink-50 px-4 py-2 rounded-2xl border border-pink-100 max-w-xs">
-                    {activeFile.infoMessage}
-                  </p>
-                )}
-              </div>
-            )}
-
-            {activeFile?.status === 'error' && activeFile.errorMessage && (
-              <div
-                role="alert"
-                className="absolute top-4 right-4 z-10 bg-rose-100 text-rose-600 px-3 py-1.5 rounded-full text-xs font-bold border-2 border-rose-200 flex items-center gap-1 max-w-[80%]"
-              >
-                <AlertTriangle className="w-3 h-3 shrink-0" aria-hidden />
-                <span className="truncate" title={activeFile.errorMessage}>
-                  {activeFile.errorMessage}
-                </span>
-              </div>
-            )}
-
-            <div className="flex-1 h-full w-full relative">
-              <Badge className="absolute top-4 left-[80px] z-10 bg-white/90 text-emerald-600 border-2 border-emerald-100 shadow-sm rounded-full px-3 py-1 gap-1 hover:bg-white">
-                <FileText className="w-3 h-3" aria-hidden /> Texto extraído
-              </Badge>
-              {activeFile && activeFile.status !== 'success' && activeFile.status === 'idle' && (
-                <Badge className="absolute top-4 right-4 z-10 bg-white/90 text-pink-500 border-2 border-pink-100 shadow-sm rounded-full px-3 py-1 gap-1 hover:bg-white">
-                  <Play className="w-3 h-3" aria-hidden /> Pendiente
-                </Badge>
-              )}
-              <label htmlFor="ocr-textarea" className="sr-only">
-                Texto extraído editable
-              </label>
-              <textarea
-                id="ocr-textarea"
-                className="w-full h-full min-h-[280px] resize-none outline-none text-slate-800 font-medium text-[16px] custom-scrollbar placeholder:text-zinc-400 agenda-paper pl-[80px] pt-[60px] pr-5 focus-visible:ring-2 focus-visible:ring-pink-300 focus-visible:ring-inset"
-                value={
-                  activeFile?.resultText ??
-                  (activeFile?.status === 'idle'
-                    ? "Mi ciela, acá va a aparecer todo tipeado como en los mismísimos renglones de tu agenda.\n\nPresioná '¡DALAAAA!' para que todo suceda."
-                    : '')
-                }
-                onChange={handleTextareaChange}
-                disabled={!activeFile || activeFile.status !== 'success'}
-                placeholder="¡Acá va a aparecer la data!"
-              />
-            </div>
-          </section>
+          <div className="flex flex-1 min-w-0 flex-col md:flex-row">
+            <OriginalViewer activeFile={activeFile} />
+            <ExtractedEditor
+              activeFile={activeFile}
+              fontSize={fontSize}
+              onChange={handleEditorChange}
+              onCopy={handleCopy}
+            />
+          </div>
         </div>
       </div>
 
