@@ -1,9 +1,12 @@
 import { GoogleGenAI } from '@google/genai';
+import Tesseract from 'tesseract.js';
 import { env } from '../../config/env';
 import { HIGHLIGHT_EXTRACTION_PROMPT } from '../../config/prompt';
 import { logger } from '../../config/logger';
+import type { OcrEngine } from './ocr.schema';
 
 const MODEL_ID = 'gemini-2.5-flash-lite';
+const TESSERACT_LANGS = 'spa+eng';
 
 export interface OcrAdapter {
   extractText(imageBuffer: Buffer, mimeType: string): Promise<string>;
@@ -33,14 +36,32 @@ export class GeminiOcrAdapter implements OcrAdapter {
   }
 }
 
-export class OcrService {
-  constructor(private readonly adapter: OcrAdapter = new GeminiOcrAdapter()) {}
+export class TesseractOcrAdapter implements OcrAdapter {
+  async extractText(imageBuffer: Buffer, _mimeType: string): Promise<string> {
+    const { data } = await Tesseract.recognize(imageBuffer, TESSERACT_LANGS);
+    return (data.text ?? '').trim();
+  }
+}
 
-  async extractTextFromBuffer(imageBuffer: Buffer, mimeType: string): Promise<string> {
+export class OcrService {
+  private readonly adapters: Record<OcrEngine, OcrAdapter>;
+
+  constructor(adapters?: Partial<Record<OcrEngine, OcrAdapter>>) {
+    this.adapters = {
+      gemini: adapters?.gemini ?? new GeminiOcrAdapter(),
+      tesseract: adapters?.tesseract ?? new TesseractOcrAdapter(),
+    };
+  }
+
+  async extractTextFromBuffer(
+    imageBuffer: Buffer,
+    mimeType: string,
+    engine: OcrEngine = 'gemini',
+  ): Promise<string> {
     try {
-      return await this.adapter.extractText(imageBuffer, mimeType);
+      return await this.adapters[engine].extractText(imageBuffer, mimeType);
     } catch (error) {
-      logger.error('[OcrService]', error);
+      logger.error(`[OcrService][${engine}]`, error);
       throw error;
     }
   }
