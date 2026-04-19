@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { ExtractResponseSchema } from '../shared/schema';
-import { getApiBase, isRateLimitMessage } from '../shared/api';
+import { isRateLimitMessage, processOcr, type OcrEngine } from '../shared/api';
 import { downscaleImage } from '../lib/imageDownscale';
 
 export type OcrStatus = 'idle' | 'processing' | 'success' | 'error';
@@ -20,11 +20,13 @@ interface OcrState {
   activeFileId: string | null;
   globalStatus: 'idle' | 'working' | 'done';
   globalProgress: number;
+  selectedEngine: OcrEngine;
 
   addFiles: (files: File[]) => void;
   setActiveFile: (id: string) => void;
   removeFile: (id: string) => void;
   clearAll: () => void;
+  setSelectedEngine: (engine: OcrEngine) => void;
 
   processAll: () => Promise<void>;
   processOne: (id: string) => Promise<void>;
@@ -63,14 +65,7 @@ async function extractOneWithRetries(
     if (signal.aborted) return;
 
     try {
-      const formData = new FormData();
-      formData.append('image', compressed, compressed.name);
-
-      const res = await fetch(`${getApiBase()}/api/ocr/extract`, {
-        method: 'POST',
-        body: formData,
-        signal,
-      });
+      const res = await processOcr(compressed, compressed.name, store.selectedEngine, signal);
 
       const rawJson = await res.json().catch(() => null);
       const parsed = rawJson ? ExtractResponseSchema.safeParse(rawJson) : null;
@@ -161,6 +156,9 @@ export const useOcrStore = create<OcrState>((set, get) => ({
   activeFileId: null,
   globalStatus: 'idle',
   globalProgress: 0,
+  selectedEngine: 'gemini',
+
+  setSelectedEngine: (engine) => set({ selectedEngine: engine }),
 
   addFiles: (newFiles) => {
     set((state) => {

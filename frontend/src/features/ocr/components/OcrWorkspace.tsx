@@ -42,6 +42,8 @@ export function OcrWorkspace() {
     clearAll,
     cancel,
     removeFile,
+    selectedEngine,
+    setSelectedEngine,
   } = useOcrStore();
   const [showConfirmClear, setShowConfirmClear] = useState(false);
 
@@ -128,6 +130,17 @@ export function OcrWorkspace() {
       <div className="flex flex-col h-full w-full paper-card overflow-visible relative z-10 group">
         <div className="flex flex-wrap gap-3 justify-between items-center bg-pink-50 p-4 border-b-2 border-pink-100 rounded-t-3xl relative z-10">
           <div className="flex items-center gap-3 flex-wrap">
+            <select
+              value={selectedEngine}
+              onChange={(e) => setSelectedEngine(e.target.value as 'gemini' | 'tesseract')}
+              disabled={working}
+              aria-label="Motor de OCR"
+              className="rounded-full border-2 border-pink-200 bg-white px-4 py-2.5 text-sm font-extrabold text-pink-600 shadow-sm focus:border-pink-400 focus:outline-none disabled:opacity-50 cursor-pointer hover:border-pink-300"
+            >
+              <option value="gemini">✨ IA (Gemini) — Alta Precisión</option>
+              <option value="tesseract">⚙️ Motor Local (Tesseract) — Gratis</option>
+            </select>
+
             {working ? (
               <button
                 onClick={cancel}
