@@ -60,7 +60,7 @@ let osdWorker: Promise<Worker> | null = null;
 
 async function getRecognizeWorker(): Promise<Worker> {
   if (!recognizeWorker) {
-    recognizeWorker = createWorker(['spa', 'eng'], 1, TESSERACT_WORKER_OPTIONS).catch((err) => {
+    recognizeWorker = createWorker(['spa', 'eng'], Tesseract.OEM.LSTM_ONLY, TESSERACT_WORKER_OPTIONS).catch((err) => {
       recognizeWorker = null;
       throw err;
     });
@@ -102,8 +102,9 @@ export class TesseractOcrAdapter implements OcrAdapter {
 
     const worker = await getRecognizeWorker();
     const first = await worker.recognize(png);
-    let text = (first.data.text ?? '').trim();
-    let confidence = first.data.confidence ?? 0;
+    let page = first.data;
+    let confidence = page.confidence ?? 0;
+    logger.info(`[Tesseract] conf=${confidence.toFixed(1)} rawLen=${(page.text ?? '').length}`);
 
     if (confidence < OCR_RETRY_CONFIDENCE) {
       const flipped = await sharp(png).rotate(180).toBuffer();
@@ -111,13 +112,61 @@ export class TesseractOcrAdapter implements OcrAdapter {
       const retryConf = retry.data.confidence ?? 0;
       logger.info(`[Tesseract] low-conf retry ${confidence.toFixed(1)} → ${retryConf.toFixed(1)}`);
       if (retryConf > confidence) {
-        text = (retry.data.text ?? '').trim();
+        page = retry.data;
         confidence = retryConf;
       }
     }
 
-    return text.length > 0 ? text : NO_HIGHLIGHT_SENTINEL;
+    const filtered = extractHighConfidenceText(page);
+    const cleaned = cleanOcrText(filtered);
+    logger.info(`[Tesseract] filteredLen=${cleaned.length}`);
+    return cleaned.length > 0 ? cleaned : NO_HIGHLIGHT_SENTINEL;
   }
+}
+
+const MIN_WORD_CONFIDENCE = 60;
+const MIN_LINE_CONFIDENCE = 50;
+const MIN_LINE_LETTERS = 3;
+const MIN_LETTER_RATIO = 0.45;
+
+function extractHighConfidenceText(page: Tesseract.Page): string {
+  const blocks = page.blocks;
+  if (!blocks || blocks.length === 0) return page.text ?? '';
+
+  const paragraphs: string[] = [];
+  for (const block of blocks) {
+    for (const para of block.paragraphs) {
+      const lines: string[] = [];
+      for (const line of para.lines) {
+        if ((line.confidence ?? 0) < MIN_LINE_CONFIDENCE) continue;
+        const keptWords = line.words
+          .filter((w) => (w.confidence ?? 0) >= MIN_WORD_CONFIDENCE)
+          .map((w) => w.text.trim())
+          .filter((t) => t.length > 0);
+        if (keptWords.length === 0) continue;
+        const lineText = keptWords.join(' ').trim();
+        if (!looksLikeText(lineText)) continue;
+        lines.push(lineText);
+      }
+      if (lines.length > 0) paragraphs.push(lines.join(' '));
+    }
+  }
+  return paragraphs.join('\n\n');
+}
+
+function looksLikeText(s: string): boolean {
+  const letters = s.match(/\p{L}/gu)?.length ?? 0;
+  if (letters < MIN_LINE_LETTERS) return false;
+  return letters / s.length >= MIN_LETTER_RATIO;
+}
+
+function cleanOcrText(raw: string): string {
+  return raw
+    .replace(/-\s+(?=\p{L})/gu, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/ ?\n ?/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^[\s]+|[\s]+$/g, '');
 }
 
 async function detectTextRotation(imageBuffer: Buffer): Promise<number> {
