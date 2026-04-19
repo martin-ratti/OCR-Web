@@ -1,4 +1,5 @@
-export type OcrEngine = 'gemini' | 'tesseract';
+export type { OcrEngine } from '@ocr-web/shared';
+import type { OcrEngine } from '@ocr-web/shared';
 
 export function getApiBase(): string {
   const raw = import.meta.env.VITE_API_URL ?? 'http://localhost:3001';

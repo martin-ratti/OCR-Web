@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "concurrently \"pnpm --filter backend dev\" \"pnpm --filter frontend dev\""
+    "build:shared": "pnpm --filter @ocr-web/shared build",
+    "dev": "pnpm build:shared && concurrently \"pnpm --filter backend dev\" \"pnpm --filter frontend dev\"",
+    "build": "pnpm build:shared && pnpm --filter backend build && pnpm --filter frontend build"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

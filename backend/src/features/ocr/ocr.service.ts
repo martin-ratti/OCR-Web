@@ -6,11 +6,11 @@ import sharp from 'sharp';
 import { env } from '../../config/env';
 import { HIGHLIGHT_EXTRACTION_PROMPT, NO_HIGHLIGHT_SENTINEL } from '../../config/prompt';
 import { logger } from '../../config/logger';
-import type { OcrEngine } from './ocr.schema';
+import type { OcrEngine } from '@ocr-web/shared';
 import { buildHighlightMaskedImage, hasEnoughHighlight } from './highlightMask';
 
 const MODEL_ID = 'gemini-2.5-flash-lite';
-const TESSERACT_LANGS = 'spa+eng';
+const GEMINI_TIMEOUT_MS = 60_000;
 const OSD_DETECT_WIDTH = 1000;
 const OCR_RETRY_CONFIDENCE = 55;
 
@@ -39,7 +39,11 @@ export class GeminiOcrAdapter implements OcrAdapter {
   }
 
   async extractText(imageBuffer: Buffer, mimeType: string): Promise<string> {
-    const response = await this.ai.models.generateContent({
+    const timeoutId = setTimeout(() => {
+      logger.warn(`[Gemini] Request exceeded ${GEMINI_TIMEOUT_MS}ms timeout`);
+    }, GEMINI_TIMEOUT_MS);
+
+    const work = this.ai.models.generateContent({
       model: MODEL_ID,
       contents: [
         HIGHLIGHT_EXTRACTION_PROMPT,
@@ -51,7 +55,20 @@ export class GeminiOcrAdapter implements OcrAdapter {
         thinkingConfig: { thinkingBudget: 1024 },
       },
     });
-    return response.text ? response.text.trim() : '';
+
+    const timeout = new Promise<never>((_, reject) => {
+      setTimeout(
+        () => reject(new Error(`Gemini timeout after ${GEMINI_TIMEOUT_MS}ms`)),
+        GEMINI_TIMEOUT_MS,
+      );
+    });
+
+    try {
+      const response = await Promise.race([work, timeout]);
+      return response.text ? response.text.trim() : '';
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 }
 

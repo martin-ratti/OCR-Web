@@ -1,4 +1,5 @@
-import { useOcrStore } from './store/useOcrStore';
+import { useEffect } from 'react';
+import { ocrSelectors, useOcrStore } from './store/useOcrStore';
 import { OcrDropzone } from './features/ocr/components/OcrDropzone';
 import { OcrWorkspace } from './features/ocr/components/OcrWorkspace';
 import { Toaster } from 'sonner';
@@ -6,8 +7,18 @@ import { Stethoscope, Sparkles, Heart } from 'lucide-react';
 import { TooltipProvider } from '@/components/ui/tooltip';
 
 export default function App() {
-  const files = useOcrStore((state) => state.files);
+  const files = useOcrStore(ocrSelectors.files);
+  const revokeAllPreviews = useOcrStore((s) => s.revokeAllPreviews);
   const hasFiles = files.length > 0;
+
+  useEffect(() => {
+    const onUnload = () => revokeAllPreviews();
+    window.addEventListener('beforeunload', onUnload);
+    return () => {
+      window.removeEventListener('beforeunload', onUnload);
+      revokeAllPreviews();
+    };
+  }, [revokeAllPreviews]);
 
   return (
     <TooltipProvider delayDuration={250} skipDelayDuration={120}>

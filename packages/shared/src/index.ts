@@ -13,5 +13,4 @@ export const ExtractResponseSchema = z.object({
   text: z.string(),
   warnings: z.array(z.string()).optional(),
 });
-
 export type ExtractResponse = z.infer<typeof ExtractResponseSchema>;

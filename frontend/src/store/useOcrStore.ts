@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { ExtractResponseSchema } from '../shared/schema';
+import { persist, createJSONStorage } from 'zustand/middleware';
+import { ExtractResponseSchema } from '@ocr-web/shared';
 import { isRateLimitMessage, processOcr, type OcrEngine } from '../shared/api';
 import { downscaleImage } from '../lib/imageDownscale';
 
@@ -13,6 +14,13 @@ export interface OcrFile {
   resultText?: string;
   errorMessage?: string;
   infoMessage?: string;
+  compressed?: File;
+}
+
+interface UndoSnapshot {
+  files: OcrFile[];
+  activeFileId: string | null;
+  takenAt: number;
 }
 
 interface OcrState {
@@ -21,31 +29,54 @@ interface OcrState {
   globalStatus: 'idle' | 'working' | 'done';
   globalProgress: number;
   selectedEngine: OcrEngine;
+  fontSize: number;
+  textCache: Record<string, string>;
+  lastClearedSnapshot: UndoSnapshot | null;
 
   addFiles: (files: File[]) => void;
   setActiveFile: (id: string) => void;
   removeFile: (id: string) => void;
   clearAll: () => void;
+  restoreCleared: () => boolean;
   setSelectedEngine: (engine: OcrEngine) => void;
+  setFontSize: (size: number) => void;
 
   processAll: () => Promise<void>;
   processOne: (id: string) => Promise<void>;
+  retryAllErrors: () => Promise<void>;
+  processSelected: (ids: string[]) => Promise<void>;
+  removeFiles: (ids: string[]) => void;
+  reorderFile: (fromId: string, toId: string) => void;
   cancel: () => void;
   updateFileResult: (id: string, text: string) => void;
+  revokeAllPreviews: () => void;
 }
 
 const MAX_FILES = 200;
 const INTER_FILE_DELAY_MS = 5000;
 const MAX_ATTEMPTS = 5;
+const UNDO_TTL_MS = 12_000;
 
 let abortController: AbortController | null = null;
 let cancelled = false;
+
+function cacheKey(f: File): string {
+  return `${f.name}::${f.size}`;
+}
+
+async function ensureCompressed(state: OcrState, fileId: string): Promise<File> {
+  const target = state.files.find((f) => f.id === fileId);
+  if (!target) throw new Error('File not found');
+  if (target.compressed) return target.compressed;
+  const c = await downscaleImage(target.file);
+  return c;
+}
 
 async function extractOneWithRetries(
   store: OcrState,
   setState: (fn: (s: OcrState) => Partial<OcrState>) => void,
   fileId: string,
-  signal: AbortSignal
+  signal: AbortSignal,
 ): Promise<void> {
   const target = store.files.find((f) => f.id === fileId);
   if (!target) return;
@@ -54,11 +85,16 @@ async function extractOneWithRetries(
     files: s.files.map((f) =>
       f.id === fileId
         ? { ...f, status: 'processing', errorMessage: undefined, infoMessage: undefined }
-        : f
+        : f,
     ),
   }));
 
-  const compressed = await downscaleImage(target.file);
+  const compressed = target.compressed ?? (await downscaleImage(target.file));
+  if (!target.compressed) {
+    setState((s) => ({
+      files: s.files.map((f) => (f.id === fileId ? { ...f, compressed } : f)),
+    }));
+  }
 
   let attempt = 0;
   while (attempt < MAX_ATTEMPTS) {
@@ -66,7 +102,6 @@ async function extractOneWithRetries(
 
     try {
       const res = await processOcr(compressed, compressed.name, store.selectedEngine, signal);
-
       const rawJson = await res.json().catch(() => null);
       const parsed = rawJson ? ExtractResponseSchema.safeParse(rawJson) : null;
       const body = parsed?.success ? parsed.data : null;
@@ -80,18 +115,20 @@ async function extractOneWithRetries(
 
       if (!body) throw new Error('Respuesta inválida del servidor');
 
+      const text = body.text;
       setState((s) => ({
         files: s.files.map((f) =>
           f.id === fileId
             ? {
                 ...f,
                 status: 'success',
-                resultText: body.text,
+                resultText: text,
                 errorMessage: undefined,
                 infoMessage: undefined,
               }
-            : f
+            : f,
         ),
+        textCache: { ...s.textCache, [cacheKey(target.file)]: text },
       }));
       return;
     } catch (err: unknown) {
@@ -116,7 +153,7 @@ async function extractOneWithRetries(
                     : e.message || 'Error desconocido',
                   infoMessage: undefined,
                 }
-              : f
+              : f,
           ),
         }));
         return;
@@ -132,7 +169,7 @@ async function extractOneWithRetries(
                   ? `La IA está a mil. Esperando ${waitSec}s (intento ${attempt}/${MAX_ATTEMPTS - 1})...`
                   : `Reintentando en ${waitSec}s (intento ${attempt}/${MAX_ATTEMPTS - 1})...`,
               }
-            : f
+            : f,
         ),
       }));
 
@@ -144,125 +181,317 @@ async function extractOneWithRetries(
             clearTimeout(t);
             reject(new DOMException('aborted', 'AbortError'));
           },
-          { once: true }
+          { once: true },
         );
       }).catch(() => {});
     }
   }
 }
 
-export const useOcrStore = create<OcrState>((set, get) => ({
-  files: [],
-  activeFileId: null,
-  globalStatus: 'idle',
-  globalProgress: 0,
-  selectedEngine: 'gemini',
+export const useOcrStore = create<OcrState>()(
+  persist(
+    (set, get) => ({
+      files: [],
+      activeFileId: null,
+      globalStatus: 'idle',
+      globalProgress: 0,
+      selectedEngine: 'gemini',
+      fontSize: 16,
+      textCache: {},
+      lastClearedSnapshot: null,
 
-  setSelectedEngine: (engine) => set({ selectedEngine: engine }),
+      setSelectedEngine: (engine) => set({ selectedEngine: engine }),
+      setFontSize: (size) => set({ fontSize: Math.min(28, Math.max(12, Math.round(size))) }),
 
-  addFiles: (newFiles) => {
-    set((state) => {
-      const remainingSlots = MAX_FILES - state.files.length;
-      const accepted = newFiles.slice(0, Math.max(0, remainingSlots));
+      addFiles: (newFiles) => {
+        set((state) => {
+          const remainingSlots = MAX_FILES - state.files.length;
+          const accepted = newFiles.slice(0, Math.max(0, remainingSlots));
 
-      const ocrFiles: OcrFile[] = accepted.map((f) => ({
-        id: crypto.randomUUID(),
-        file: f,
-        previewUrl: URL.createObjectURL(f),
-        status: 'idle',
-      }));
+          const ocrFiles: OcrFile[] = accepted.map((f) => {
+            const cached = state.textCache[cacheKey(f)];
+            return {
+              id: crypto.randomUUID(),
+              file: f,
+              previewUrl: URL.createObjectURL(f),
+              status: cached ? 'success' : 'idle',
+              resultText: cached,
+            };
+          });
 
-      const updated = [...state.files, ...ocrFiles];
-      return {
-        files: updated,
-        activeFileId: state.activeFileId || ocrFiles[0]?.id || null,
-        globalStatus: 'idle',
-        globalProgress: 0,
-      };
-    });
-  },
-
-  setActiveFile: (id) => set({ activeFileId: id }),
-
-  removeFile: (id) =>
-    set((state) => {
-      const toRemove = state.files.find((f) => f.id === id);
-      if (toRemove) URL.revokeObjectURL(toRemove.previewUrl);
-
-      const remaining = state.files.filter((f) => f.id !== id);
-      return {
-        files: remaining,
-        activeFileId:
-          state.activeFileId === id ? remaining[0]?.id ?? null : state.activeFileId,
-      };
-    }),
-
-  clearAll: () => {
-    cancelled = true;
-    abortController?.abort();
-    abortController = null;
-    set((state) => {
-      state.files.forEach((f) => URL.revokeObjectURL(f.previewUrl));
-      return {
-        files: [],
-        activeFileId: null,
-        globalStatus: 'idle',
-        globalProgress: 0,
-      };
-    });
-  },
-
-  updateFileResult: (id, text) =>
-    set((state) => ({
-      files: state.files.map((f) => (f.id === id ? { ...f, resultText: text } : f)),
-    })),
-
-  cancel: () => {
-    cancelled = true;
-    abortController?.abort();
-    abortController = null;
-    set({ globalStatus: 'done' });
-  },
-
-  processOne: async (id) => {
-    abortController = new AbortController();
-    cancelled = false;
-    set({ globalStatus: 'working' });
-    const state = get();
-    await extractOneWithRetries(state, set as never, id, abortController.signal);
-    if (!cancelled) set({ globalStatus: 'done' });
-  },
-
-  processAll: async () => {
-    const state = get();
-    const toProcess = state.files.filter((f) => f.status === 'idle' || f.status === 'error');
-    if (toProcess.length === 0) return;
-
-    abortController = new AbortController();
-    cancelled = false;
-    const { signal } = abortController;
-
-    set({ globalStatus: 'working', globalProgress: 0 });
-
-    for (let i = 0; i < toProcess.length; i++) {
-      if (signal.aborted || cancelled) break;
-
-      await extractOneWithRetries(get(), set as never, toProcess[i].id, signal);
-
-      const processedCount = i + 1;
-      set({ globalProgress: Math.round((processedCount / toProcess.length) * 100) });
-
-      if (i < toProcess.length - 1 && !signal.aborted) {
-        await new Promise<void>((resolve) => {
-          const t = setTimeout(resolve, INTER_FILE_DELAY_MS);
-          signal.addEventListener('abort', () => {
-            clearTimeout(t);
-            resolve();
-          }, { once: true });
+          const updated = [...state.files, ...ocrFiles];
+          return {
+            files: updated,
+            activeFileId: state.activeFileId || ocrFiles[0]?.id || null,
+            globalStatus: 'idle',
+            globalProgress: 0,
+          };
         });
-      }
-    }
+      },
 
-    set({ globalStatus: 'done' });
-  },
-}));
+      setActiveFile: (id) => set({ activeFileId: id }),
+
+      removeFile: (id) =>
+        set((state) => {
+          const toRemove = state.files.find((f) => f.id === id);
+          if (toRemove) URL.revokeObjectURL(toRemove.previewUrl);
+
+          const remaining = state.files.filter((f) => f.id !== id);
+          return {
+            files: remaining,
+            activeFileId:
+              state.activeFileId === id ? remaining[0]?.id ?? null : state.activeFileId,
+          };
+        }),
+
+      clearAll: () => {
+        cancelled = true;
+        abortController?.abort();
+        abortController = null;
+        set((state) => {
+          if (state.files.length === 0) return {};
+          const snapshot: UndoSnapshot = {
+            files: state.files,
+            activeFileId: state.activeFileId,
+            takenAt: Date.now(),
+          };
+          return {
+            files: [],
+            activeFileId: null,
+            globalStatus: 'idle',
+            globalProgress: 0,
+            lastClearedSnapshot: snapshot,
+          };
+        });
+        window.setTimeout(() => {
+          const snap = get().lastClearedSnapshot;
+          if (snap && Date.now() - snap.takenAt >= UNDO_TTL_MS) {
+            snap.files.forEach((f) => URL.revokeObjectURL(f.previewUrl));
+            set({ lastClearedSnapshot: null });
+          }
+        }, UNDO_TTL_MS + 200);
+      },
+
+      restoreCleared: () => {
+        const snap = get().lastClearedSnapshot;
+        if (!snap) return false;
+        if (Date.now() - snap.takenAt > UNDO_TTL_MS) {
+          set({ lastClearedSnapshot: null });
+          return false;
+        }
+        set({
+          files: snap.files,
+          activeFileId: snap.activeFileId,
+          lastClearedSnapshot: null,
+          globalStatus: 'idle',
+          globalProgress: 0,
+        });
+        return true;
+      },
+
+      revokeAllPreviews: () => {
+        const { files, lastClearedSnapshot } = get();
+        files.forEach((f) => URL.revokeObjectURL(f.previewUrl));
+        lastClearedSnapshot?.files.forEach((f) => URL.revokeObjectURL(f.previewUrl));
+      },
+
+      updateFileResult: (id, text) =>
+        set((state) => {
+          const target = state.files.find((f) => f.id === id);
+          const newCache = target
+            ? { ...state.textCache, [cacheKey(target.file)]: text }
+            : state.textCache;
+          return {
+            files: state.files.map((f) => (f.id === id ? { ...f, resultText: text } : f)),
+            textCache: newCache,
+          };
+        }),
+
+      cancel: () => {
+        cancelled = true;
+        abortController?.abort();
+        abortController = null;
+        set({ globalStatus: 'done' });
+      },
+
+      processOne: async (id) => {
+        abortController = new AbortController();
+        cancelled = false;
+        set({ globalStatus: 'working' });
+        const state = get();
+        await extractOneWithRetries(state, set as never, id, abortController.signal);
+        if (!cancelled) set({ globalStatus: 'done' });
+      },
+
+      processAll: async () => {
+        const state = get();
+        const toProcess = state.files.filter((f) => f.status === 'idle' || f.status === 'error');
+        if (toProcess.length === 0) return;
+
+        abortController = new AbortController();
+        cancelled = false;
+        const { signal } = abortController;
+
+        set({ globalStatus: 'working', globalProgress: 0 });
+
+        for (let i = 0; i < toProcess.length; i++) {
+          if (signal.aborted || cancelled) break;
+
+          const nextId = toProcess[i + 1]?.id;
+          const prewarm = nextId
+            ? ensureCompressed(get(), nextId)
+                .then((c) =>
+                  set((s) => ({
+                    files: s.files.map((f) => (f.id === nextId ? { ...f, compressed: c } : f)),
+                  })),
+                )
+                .catch(() => {})
+            : Promise.resolve();
+
+          await extractOneWithRetries(get(), set as never, toProcess[i].id, signal);
+
+          const processedCount = i + 1;
+          set({ globalProgress: Math.round((processedCount / toProcess.length) * 100) });
+
+          if (i < toProcess.length - 1 && !signal.aborted) {
+            await Promise.all([
+              prewarm,
+              new Promise<void>((resolve) => {
+                const t = setTimeout(resolve, INTER_FILE_DELAY_MS);
+                signal.addEventListener(
+                  'abort',
+                  () => {
+                    clearTimeout(t);
+                    resolve();
+                  },
+                  { once: true },
+                );
+              }),
+            ]);
+          }
+        }
+
+        set({ globalStatus: 'done' });
+      },
+
+      retryAllErrors: async () => {
+        const errored = get().files.filter((f) => f.status === 'error');
+        if (errored.length === 0) return;
+        await get().processAll();
+      },
+
+      reorderFile: (fromId, toId) =>
+        set((state) => {
+          if (fromId === toId) return {};
+          const fromIdx = state.files.findIndex((f) => f.id === fromId);
+          const toIdx = state.files.findIndex((f) => f.id === toId);
+          if (fromIdx < 0 || toIdx < 0) return {};
+          const next = state.files.slice();
+          const [moved] = next.splice(fromIdx, 1);
+          next.splice(toIdx, 0, moved);
+          return { files: next };
+        }),
+
+      removeFiles: (ids) =>
+        set((state) => {
+          const idSet = new Set(ids);
+          state.files.forEach((f) => {
+            if (idSet.has(f.id)) URL.revokeObjectURL(f.previewUrl);
+          });
+          const remaining = state.files.filter((f) => !idSet.has(f.id));
+          return {
+            files: remaining,
+            activeFileId:
+              state.activeFileId && idSet.has(state.activeFileId)
+                ? remaining[0]?.id ?? null
+                : state.activeFileId,
+          };
+        }),
+
+      processSelected: async (ids) => {
+        const idSet = new Set(ids);
+        const toProcess = get().files.filter((f) => idSet.has(f.id) && f.status !== 'processing');
+        if (toProcess.length === 0) return;
+
+        set((s) => ({
+          files: s.files.map((f) =>
+            idSet.has(f.id) && f.status !== 'processing'
+              ? {
+                  ...f,
+                  status: 'idle',
+                  errorMessage: undefined,
+                  infoMessage: undefined,
+                }
+              : f,
+          ),
+        }));
+
+        abortController = new AbortController();
+        cancelled = false;
+        const { signal } = abortController;
+
+        set({ globalStatus: 'working', globalProgress: 0 });
+
+        for (let i = 0; i < toProcess.length; i++) {
+          if (signal.aborted || cancelled) break;
+
+          const nextId = toProcess[i + 1]?.id;
+          const prewarm = nextId
+            ? ensureCompressed(get(), nextId)
+                .then((c) =>
+                  set((s) => ({
+                    files: s.files.map((f) => (f.id === nextId ? { ...f, compressed: c } : f)),
+                  })),
+                )
+                .catch(() => {})
+            : Promise.resolve();
+
+          await extractOneWithRetries(get(), set as never, toProcess[i].id, signal);
+
+          const processedCount = i + 1;
+          set({ globalProgress: Math.round((processedCount / toProcess.length) * 100) });
+
+          if (i < toProcess.length - 1 && !signal.aborted) {
+            await Promise.all([
+              prewarm,
+              new Promise<void>((resolve) => {
+                const t = setTimeout(resolve, INTER_FILE_DELAY_MS);
+                signal.addEventListener(
+                  'abort',
+                  () => {
+                    clearTimeout(t);
+                    resolve();
+                  },
+                  { once: true },
+                );
+              }),
+            ]);
+          }
+        }
+
+        set({ globalStatus: 'done' });
+      },
+    }),
+    {
+      name: 'ocr-web-state',
+      version: 2,
+      storage: createJSONStorage(() => localStorage),
+      partialize: (state) => ({
+        selectedEngine: state.selectedEngine,
+        fontSize: state.fontSize,
+        textCache: state.textCache,
+      }),
+    },
+  ),
+);
+
+export const ocrSelectors = {
+  files: (s: OcrState) => s.files,
+  activeFile: (s: OcrState) => s.files.find((f) => f.id === s.activeFileId),
+  activeFileId: (s: OcrState) => s.activeFileId,
+  globalStatus: (s: OcrState) => s.globalStatus,
+  globalProgress: (s: OcrState) => s.globalProgress,
+  selectedEngine: (s: OcrState) => s.selectedEngine,
+  fontSize: (s: OcrState) => s.fontSize,
+  hasUndo: (s: OcrState) => !!s.lastClearedSnapshot,
+};

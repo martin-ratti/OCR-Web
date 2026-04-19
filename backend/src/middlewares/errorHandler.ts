@@ -17,49 +17,62 @@ function isRateLimitError(err: unknown): boolean {
   );
 }
 
+const SAFE_PUBLIC_MESSAGES = {
+  rateLimit: 'Límite de uso alcanzado. Probá nuevamente en unos minutos.',
+  upstream: 'No pudimos procesar la imagen. Probá de nuevo.',
+  badRequest: 'Solicitud inválida.',
+  payloadTooLarge: 'La imagen supera el tamaño máximo permitido (5 MB).',
+  unsupportedFile: 'Tipo de archivo no soportado.',
+  internal: 'Error interno del servidor. Probá de nuevo más tarde.',
+} as const;
+
+function safeMulterMessage(err: multer.MulterError): { status: number; message: string } {
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    return { status: 413, message: SAFE_PUBLIC_MESSAGES.payloadTooLarge };
+  }
+  if (err.code === 'LIMIT_UNEXPECTED_FILE' || err.code === 'LIMIT_FILE_COUNT') {
+    return { status: 400, message: SAFE_PUBLIC_MESSAGES.badRequest };
+  }
+  return { status: 400, message: SAFE_PUBLIC_MESSAGES.badRequest };
+}
+
 export function errorHandler(
   err: unknown,
-  _req: Request,
+  req: Request,
   res: Response,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _next: NextFunction
 ) {
+  const reqId = (req as Request & { requestId?: string }).requestId;
+  const idTag = reqId ? `[req=${reqId}] ` : '';
+
   if (err instanceof multer.MulterError) {
-    const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
-    logger.warn('[Multer]', err.code, err.message);
-    res.status(status).json({
-      status: 'error',
-      text: '',
-      warnings: [err.message],
-    });
+    const { status, message } = safeMulterMessage(err);
+    logger.warn(`${idTag}[Multer] code=${err.code} msg=${err.message}`);
+    res.status(status).json({ status: 'error', text: '', warnings: [message] });
     return;
   }
 
   if (err instanceof HttpError) {
-    res.status(err.status).json({
-      status: 'error',
-      text: '',
-      warnings: [err.message],
-    });
+    res.status(err.status).json({ status: 'error', text: '', warnings: [err.message] });
     return;
   }
 
   if (isRateLimitError(err)) {
-    const message = (err as Error).message || 'Gemini rate limit reached';
-    logger.warn('[RateLimit]', message);
+    const internal = (err as Error).message || 'rate limit';
+    logger.warn(`${idTag}[RateLimit] ${internal}`);
     res.status(429).json({
       status: 'error',
       text: '',
-      warnings: [message],
+      warnings: [SAFE_PUBLIC_MESSAGES.rateLimit],
     });
     return;
   }
 
-  const message = err instanceof Error ? err.message : 'Unknown server error';
-  logger.error('[Unhandled]', err);
+  const internal = err instanceof Error ? err.message : String(err);
+  logger.error(`${idTag}[Unhandled]`, internal, err instanceof Error ? err.stack : undefined);
   res.status(500).json({
     status: 'error',
     text: '',
-    warnings: [message],
+    warnings: [SAFE_PUBLIC_MESSAGES.upstream],
   });
 }

@@ -13,3 +13,12 @@ export const logger = {
   warn: (...args: LogArgs) => console.warn(...fmt('WARN', args)),
   error: (...args: LogArgs) => console.error(...fmt('ERROR', args)),
 };
+
+export function withRequestId(reqId: string | undefined) {
+  const tag = reqId ? `[req=${reqId}]` : '';
+  return {
+    info: (...args: LogArgs) => logger.info(tag, ...args),
+    warn: (...args: LogArgs) => logger.warn(tag, ...args),
+    error: (...args: LogArgs) => logger.error(tag, ...args),
+  };
+}

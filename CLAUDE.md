@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-This is a **pnpm workspace** monorepo (`backend/` + `frontend/`). Never use npm/yarn — it breaks the workspace lockfile.
+This is a **pnpm workspace** monorepo (`backend/` + `frontend/` + `packages/shared/`). Never use npm/yarn — it breaks the workspace lockfile. The `@ocr-web/shared` package must be built (`pnpm build:shared`) before backend/frontend can resolve its compiled output.
 
 From repo root:
 - `pnpm install` — install all workspace deps
@@ -56,7 +56,8 @@ Middlewares in `backend/src/middlewares/`:
 Feature-Sliced-Design-lite. Layers:
 - `features/ocr/components/` — presentation (Shadcn/Radix + Tailwind). `OcrDropzone` and `OcrWorkspace` are the two top-level states.
 - `store/useOcrStore.ts` — Zustand store; owns queue, per-file status, global progress, abort controller, and the upload loop (`processAll` / `processOne` / `cancel`).
-- `shared/` — cross-cutting: `schema.ts` (Zod `ExtractResponseSchema`, mirrored with backend), `api.ts` (`getApiBase` trailing-slash normalizer, `isRateLimitMessage`).
+- `shared/api.ts` — cross-cutting: `getApiBase` trailing-slash normalizer, `isRateLimitMessage`, re-exports `OcrEngine` type from `@ocr-web/shared`.
+- Zod schemas live in the `@ocr-web/shared` workspace package (`packages/shared/src/index.ts`), imported by both backend and frontend. Single source of truth — do not re-declare in either side.
 - `lib/imageDownscale.ts` — canvas-based resize to 1600px max dimension at JPEG q=0.85 before upload; skips small files.
 - `components/ErrorBoundary.tsx` — wraps the whole app in `main.tsx`.
 - `components/ui/` — Shadcn primitives (style `new-york`, base `zinc`, alias `@/*` → `src/*`, see `components.json` + `vite.config.ts`). `dialog.tsx` is the Radix-backed Dialog; `KawaiiModal` is a themed wrapper around it (ESC / focus trap / scroll lock handled by Radix).

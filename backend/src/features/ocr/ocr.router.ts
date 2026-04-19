@@ -3,9 +3,11 @@ import { OcrController } from './ocr.controller';
 import { uploadImage } from '../../middlewares/upload';
 import { ocrLimiter } from '../../middlewares/rateLimit';
 
-const router = Router();
-const ocrController = new OcrController();
+export function createOcrRouter(controller: OcrController = new OcrController()): Router {
+  const router = Router();
+  router.post('/extract', ocrLimiter, uploadImage.single('image'), controller.extractText);
+  return router;
+}
 
-router.post('/extract', ocrLimiter, uploadImage.single('image'), ocrController.extractText);
-
+const router = createOcrRouter();
 export default router;
