@@ -125,13 +125,6 @@ export function OcrWorkspace() {
     updateFileResult(activeFile.id, e.target.value);
   };
 
-  const engineIcon =
-    selectedEngine === 'gemini' ? (
-      <Sparkles className="w-4 h-4 text-pink-500" aria-hidden />
-    ) : (
-      <Cpu className="w-4 h-4 text-indigo-500" aria-hidden />
-    );
-
   return (
     <div className="relative w-full min-h-[calc(100vh-12rem)] mx-auto">
       <div
@@ -167,10 +160,7 @@ export function OcrWorkspace() {
                 aria-label="Motor de OCR"
                 className="h-10 min-w-[232px] rounded-full border-2 border-pink-200 bg-white px-4 text-sm font-extrabold text-pink-600 shadow-sm hover:border-pink-300 focus:ring-2 focus:ring-pink-300 focus:ring-offset-1"
               >
-                <span className="flex items-center gap-2">
-                  {engineIcon}
-                  <SelectValue placeholder="Elegí el motor" />
-                </span>
+                <SelectValue placeholder="Elegí el motor" />
               </SelectTrigger>
               <SelectContent className="rounded-2xl border-2 border-pink-100">
                 <SelectItem value="gemini" className="font-bold">
