@@ -17,9 +17,11 @@ app.use(
   cors({
     origin: (origin, cb) => {
       if (!origin) return cb(null, true);
-      if (env.ALLOWED_ORIGINS.includes('*') || env.ALLOWED_ORIGINS.includes(origin)) {
+      const normalized = origin.replace(/\/+$/, '');
+      if (env.ALLOWED_ORIGINS.includes('*') || env.ALLOWED_ORIGINS.includes(normalized)) {
         return cb(null, true);
       }
+      logger.warn(`[CORS] Rejected origin=${origin} allowed=${JSON.stringify(env.ALLOWED_ORIGINS)}`);
       return cb(new Error(`Origin ${origin} not allowed by CORS`));
     },
     methods: ['GET', 'POST', 'OPTIONS'],
@@ -40,4 +42,5 @@ app.use(errorHandler);
 
 app.listen(env.PORT, () => {
   logger.info(`[Server] Listening on http://localhost:${env.PORT} (env=${env.NODE_ENV})`);
+  logger.info(`[CORS] Allowed origins: ${JSON.stringify(env.ALLOWED_ORIGINS)}`);
 });
