@@ -10,10 +10,13 @@ Esta guía te explica cómo subir el proyecto a internet de forma gratuita usand
 2. **Nuevo Web Service**: Conectá tu repositorio de GitHub.
 3. **Configuración**:
    - **Name**: `ocr-backend` (o el que quieras)
-   - **Root Directory**: `backend`
+   - **Root Directory**: *(dejar vacío — usar la raíz del repo)*
    - **Environment**: `Node`
-   - **Build Command**: `pnpm install && pnpm build`
-   - **Start Command**: `node dist/index.js`
+   - **Build Command**: `pnpm install && pnpm --filter backend build`
+   - **Start Command**: `node backend/dist/index.js`
+
+   > [!IMPORTANT]
+   > Render **debe** correr desde la raíz del repo, no desde `backend/`. Este monorepo usa `pnpm workspaces` y `@ocr-web/shared` está declarado como `workspace:*`; si pnpm arranca dentro de `backend/` no ve el `pnpm-workspace.yaml` de la raíz y el install falla. El script `build` del backend ya compila `@ocr-web/shared` antes del `tsc`, así que no hace falta pasos extra.
 4. **Variables de Entorno (Environment Variables)**:
    - `GEMINI_API_KEY`: Tu clave de Google AI Studio. **Obligatoria** — el servidor no arranca si falta.
    - `NODE_ENV`: `production`
@@ -32,6 +35,8 @@ Esta guía te explica cómo subir el proyecto a internet de forma gratuita usand
 3. **Configuración**:
    - **Framework Preset**: `Vite` (lo detectará solo)
    - **Root Directory**: `frontend`
+   - **Install Command**: *(default — Vercel corre `pnpm install` y resuelve el workspace de la raíz)*
+   - **Build Command**: *(default `pnpm run build` — el script ya compila `@ocr-web/shared` antes del `tsc -b && vite build`)*
 4. **Variables de Entorno (Environment Variables)**:
    - `VITE_API_URL`: Pegá acá la URL que te dio Render (ej: `https://ocr-backend.onrender.com`). **IMPORTANTE**: No le pongas `/api` al final, solo la URL base. El cliente normaliza trailing slashes.
 

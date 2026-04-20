@@ -8,7 +8,9 @@ This is a **pnpm workspace** monorepo (`backend/` + `frontend/` + `packages/shar
 
 From repo root:
 - `pnpm install` — install all workspace deps
-- `pnpm dev` — run backend + frontend concurrently via `concurrently`
+- `pnpm build:shared` — compile `@ocr-web/shared` (`packages/shared/src/index.ts` → `dist/` via `tsc -p tsconfig.json`). Backend/frontend import the compiled output, so this must be fresh before their own dev/build runs.
+- `pnpm dev` — runs `pnpm build:shared` first, then starts backend + frontend together via `concurrently`. You don't need to build shared manually before `pnpm dev`.
+- `pnpm build` — chained build: shared → backend → frontend.
 
 Backend (`pnpm --filter backend <cmd>` or run inside `backend/`):
 - `pnpm dev` — `ts-node-dev src/index.ts`, listens on `PORT` or `3001`
@@ -28,6 +30,8 @@ Backend env lives in `backend/.env`:
 - `PORT` — default `3001`.
 
 Frontend reads `VITE_API_URL` (base URL only — do **not** include `/api`; trailing slashes are stripped by `shared/api.ts`). Defaults to `http://localhost:3001`.
+
+`rules.json` at the repo root is tracked (project-level rule config — don't delete as housekeeping). `scratch/` is gitignored workspace for local experiments; treat files there as throwaway and don't rely on them.
 
 ## Architecture ("EstacionAR")
 

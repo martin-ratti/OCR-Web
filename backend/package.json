@@ -8,7 +8,7 @@
     "test:watch": "vitest",
     "lint": "eslint .",
     "dev": "ts-node-dev src/index.ts",
-    "build": "tsc"
+    "build": "pnpm --filter @ocr-web/shared build && tsc"
   },
   "keywords": [],
   "author": "",
