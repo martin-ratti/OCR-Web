@@ -35,7 +35,7 @@ export class GeminiOcrAdapter implements OcrAdapter {
     if (!apiKey) {
       throw new Error('GEMINI_API_KEY no configurada. Usá el motor Tesseract o agregá la key en backend/.env.');
     }
-    this.ai = new GoogleGenAI({ apiKey, apiVersion: 'v1' });
+    this.ai = new GoogleGenAI({ apiKey });
   }
 
   async extractText(imageBuffer: Buffer, mimeType: string): Promise<string> {
