@@ -25,7 +25,7 @@ Frontend (`pnpm --filter frontend <cmd>` or run inside `frontend/`):
 - `pnpm preview` — preview prod build
 
 Backend env lives in `backend/.env`:
-- `GEMINI_API_KEY` — required; validated by Zod at boot, server exits if missing.
+- `GEMINI_API_KEY` — optional at boot (Zod `.optional()` in `env.ts`). Tesseract engine works without it; only the Gemini adapter throws if a request hits it with no key set.
 - `ALLOWED_ORIGINS` — comma-separated CORS whitelist; defaults to `http://localhost:5173,http://localhost:4173`. Use `*` only in dev.
 - `NODE_ENV` — `development` | `production` | `test` (default `development`).
 - `PORT` — default `3001`.

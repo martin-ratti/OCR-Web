@@ -7,12 +7,12 @@ import { env } from '../../config/env';
 import { HIGHLIGHT_EXTRACTION_PROMPT, NO_HIGHLIGHT_SENTINEL } from '../../config/prompt';
 import { logger } from '../../config/logger';
 import type { OcrEngine } from '@ocr-web/shared';
-import { buildHighlightMaskedImage, hasEnoughHighlight } from './highlightMask';
+import { buildHighlightMaskedImage, hasEnoughHighlight, upscaleMask } from './highlightMask';
 
 const MODEL_ID = 'gemini-2.5-flash-lite';
 const GEMINI_TIMEOUT_MS = 60_000;
-const OSD_DETECT_WIDTH = 1000;
-const OCR_RETRY_CONFIDENCE = 55;
+const ROTATION_FAST_PATH_CONF = 78;   // accept rotation 0 result if it looks confident enough
+const ROTATION_FAST_PATH_LEN = 80;    // also require some text length to avoid noise pages
 
 const TESSERACT_CACHE_DIR = path.join(process.cwd(), 'node_modules', '.cache', 'tesseract');
 if (!fs.existsSync(TESSERACT_CACHE_DIR)) {
@@ -73,78 +73,112 @@ export class GeminiOcrAdapter implements OcrAdapter {
 }
 
 let recognizeWorker: Promise<Worker> | null = null;
-let osdWorker: Promise<Worker> | null = null;
 
 async function getRecognizeWorker(): Promise<Worker> {
   if (!recognizeWorker) {
-    recognizeWorker = createWorker(['spa', 'eng'], Tesseract.OEM.LSTM_ONLY, TESSERACT_WORKER_OPTIONS).catch((err) => {
-      recognizeWorker = null;
-      throw err;
-    });
-  }
-  return recognizeWorker;
-}
-
-async function getOsdWorker(): Promise<Worker> {
-  if (!osdWorker) {
-    osdWorker = createWorker('osd', Tesseract.OEM.TESSERACT_ONLY, TESSERACT_WORKER_OPTIONS)
+    recognizeWorker = createWorker(['spa', 'eng'], Tesseract.OEM.LSTM_ONLY, TESSERACT_WORKER_OPTIONS)
       .then(async (w) => {
-        await w.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.OSD_ONLY });
+        await w.setParameters({
+          tessedit_pageseg_mode: Tesseract.PSM.AUTO,
+          preserve_interword_spaces: '1',
+          user_defined_dpi: '300',
+        });
         return w;
       })
       .catch((err) => {
-        osdWorker = null;
+        recognizeWorker = null;
         throw err;
       });
   }
-  return osdWorker;
+  return recognizeWorker;
 }
 
 export class TesseractOcrAdapter implements OcrAdapter {
   async extractText(imageBuffer: Buffer, _mimeType: string): Promise<string> {
     const oriented = await sharp(imageBuffer).rotate().toBuffer();
-    const rotationDeg = await detectTextRotation(oriented);
-    const upright = rotationDeg !== 0
-      ? await sharp(oriented).rotate(-rotationDeg, { background: '#ffffff' }).toBuffer()
-      : oriented;
-
-    const { png, coverage } = await buildHighlightMaskedImage(upright);
-    logger.info(
-      `[Tesseract] rotation=${rotationDeg}deg coverage=${(coverage * 100).toFixed(3)}%`,
-    );
+    const { png, coverage } = await buildHighlightMaskedImage(oriented);
+    logger.info(`[Tesseract] coverage=${(coverage * 100).toFixed(3)}%`);
 
     if (!hasEnoughHighlight(coverage)) {
       return NO_HIGHLIGHT_SENTINEL;
     }
 
     const worker = await getRecognizeWorker();
-    const first = await worker.recognize(png);
-    let page = first.data;
-    let confidence = page.confidence ?? 0;
-    logger.info(`[Tesseract] conf=${confidence.toFixed(1)} rawLen=${(page.text ?? '').length}`);
 
-    if (confidence < OCR_RETRY_CONFIDENCE) {
-      const flipped = await sharp(png).rotate(180).toBuffer();
-      const retry = await worker.recognize(flipped);
-      const retryConf = retry.data.confidence ?? 0;
-      logger.info(`[Tesseract] low-conf retry ${confidence.toFixed(1)} → ${retryConf.toFixed(1)}`);
-      if (retryConf > confidence) {
-        page = retry.data;
-        confidence = retryConf;
+    // Phase 1 (scout): cheap OCR on 1x mask across 4 rotations to pick orientation.
+    // Fast path: if rot=0 already reads well, skip scout for the other 3.
+    const rotations: Array<0 | 90 | 180 | 270> = [0, 90, 270, 180];
+    let bestRot: 0 | 90 | 180 | 270 = 0;
+    let bestScoutScore = -Infinity;
+
+    for (const rot of rotations) {
+      const buf = rot === 0 ? png : await sharp(png).rotate(rot).toBuffer();
+      const result = await worker.recognize(buf);
+      const conf = result.data.confidence ?? 0;
+      const txt = (result.data.text ?? '').trim();
+      const score = scoreOcrResult(conf, txt.length, txt);
+      logger.info(`[Tesseract] scout rot=${rot} conf=${conf.toFixed(1)} len=${txt.length} score=${score.toFixed(1)}`);
+
+      if (score > bestScoutScore) {
+        bestScoutScore = score;
+        bestRot = rot;
+      }
+
+      if (rot === 0 && conf >= ROTATION_FAST_PATH_CONF && txt.length >= ROTATION_FAST_PATH_LEN && hasGoodSpanishRatio(txt)) {
+        break;
       }
     }
 
-    const filtered = extractHighConfidenceText(page);
-    const cleaned = cleanOcrText(filtered);
-    logger.info(`[Tesseract] filteredLen=${cleaned.length}`);
+    // Phase 2 (final): re-run picked rotation at 2x upscale with SINGLE_BLOCK PSM.
+    // Image is now upright; SINGLE_BLOCK is far more accurate than AUTO on our
+    // segmented mask (AUTO mis-detects column splits and shreds paragraphs).
+    const upscaled = await upscaleMask(png, 2);
+    const finalBuf = bestRot === 0 ? upscaled : await sharp(upscaled).rotate(bestRot).toBuffer();
+    await worker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.SINGLE_BLOCK });
+    const finalResult = await worker.recognize(finalBuf);
+    await worker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.AUTO });
+    const bestPage = finalResult.data;
+    const bestConf = bestPage.confidence ?? 0;
+    const bestLen = (bestPage.text ?? '').trim().length;
+    logger.info(`[Tesseract] final rot=${bestRot} conf=${bestConf.toFixed(1)} len=${bestLen}`);
+
+    let cleaned = cleanOcrText(extractHighConfidenceText(bestPage));
+
+    if (cleaned.length === 0 && (bestPage.text ?? '').trim().length > 0) {
+      const relaxed = extractRelaxedText(bestPage);
+      cleaned = cleanOcrText(relaxed);
+      logger.info(`[Tesseract] relaxed fallback len=${cleaned.length}`);
+    }
+
+    logger.info(`[Tesseract] finalLen=${cleaned.length}`);
     return cleaned.length > 0 ? cleaned : NO_HIGHLIGHT_SENTINEL;
   }
 }
 
+// Score OCR result favouring high confidence AND meaningful Spanish content.
+function scoreOcrResult(conf: number, len: number, text: string): number {
+  if (conf < 0) return -1;
+  const ratio = spanishCharRatio(text);
+  const lengthBonus = Math.log10(1 + len) * 8; // diminishing return
+  const ratioMul = 0.5 + ratio * 1.5; // 0.5x to 2x multiplier based on Spanish-likeness
+  return (conf + lengthBonus) * ratioMul;
+}
+
+function hasGoodSpanishRatio(text: string): boolean {
+  return spanishCharRatio(text) >= 0.78;
+}
+
+function spanishCharRatio(text: string): number {
+  if (text.length === 0) return 0;
+  const allowed = text.match(/[\p{L}\p{N}\s.,;:¿?¡!()"'\-—«»“”‘’]/gu)?.length ?? 0;
+  return allowed / text.length;
+}
+
 const MIN_WORD_CONFIDENCE = 60;
-const MIN_LINE_CONFIDENCE = 50;
-const MIN_LINE_LETTERS = 3;
-const MIN_LETTER_RATIO = 0.45;
+const MIN_LINE_CONFIDENCE = 55;
+const MIN_LINE_LETTERS = 4;
+const MIN_LETTER_RATIO = 0.55;
+const MIN_SPANISH_RATIO = 0.65;
 
 function extractHighConfidenceText(page: Tesseract.Page): string {
   const blocks = page.blocks;
@@ -171,10 +205,46 @@ function extractHighConfidenceText(page: Tesseract.Page): string {
   return paragraphs.join('\n\n');
 }
 
+function extractRelaxedText(page: Tesseract.Page): string {
+  const RELAXED_WORD_CONF = 35;
+  const RELAXED_LINE_CONF = 25;
+  const blocks = page.blocks;
+  if (!blocks || blocks.length === 0) return page.text ?? '';
+
+  const paragraphs: string[] = [];
+  for (const block of blocks) {
+    for (const para of block.paragraphs) {
+      const lines: string[] = [];
+      for (const line of para.lines) {
+        if ((line.confidence ?? 0) < RELAXED_LINE_CONF) continue;
+        const keptWords = line.words
+          .filter((w) => (w.confidence ?? 0) >= RELAXED_WORD_CONF)
+          .map((w) => w.text.trim())
+          .filter((t) => t.length > 0);
+        if (keptWords.length === 0) continue;
+        const lineText = keptWords.join(' ').trim();
+        if (!looksLikeText(lineText)) continue;
+        lines.push(lineText);
+      }
+      if (lines.length > 0) paragraphs.push(lines.join(' '));
+    }
+  }
+  return paragraphs.join('\n\n');
+}
+
 function looksLikeText(s: string): boolean {
   const letters = s.match(/\p{L}/gu)?.length ?? 0;
   if (letters < MIN_LINE_LETTERS) return false;
-  return letters / s.length >= MIN_LETTER_RATIO;
+  if (letters / s.length < MIN_LETTER_RATIO) return false;
+  if (spanishCharRatio(s) < MIN_SPANISH_RATIO) return false;
+  // Word-length distribution: real Spanish lines have many 4+ char words.
+  // Garbage OCR fragments are dominated by 1–2 char "words" split by junk.
+  const words = s.split(/\s+/).filter((w) => w.length > 0);
+  if (words.length < 2) return false;
+  const longWords = words.filter((w) => /\p{L}{4,}/u.test(w)).length;
+  if (longWords < 3) return false;
+  if (longWords / words.length < 0.40) return false;
+  return true;
 }
 
 function cleanOcrText(raw: string): string {
@@ -184,38 +254,6 @@ function cleanOcrText(raw: string): string {
     .replace(/ ?\n ?/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .replace(/^[\s]+|[\s]+$/g, '');
-}
-
-async function detectTextRotation(imageBuffer: Buffer): Promise<number> {
-  try {
-    const small = await sharp(imageBuffer)
-      .resize({ width: OSD_DETECT_WIDTH, withoutEnlargement: true })
-      .jpeg({ quality: 85 })
-      .toBuffer();
-    const worker = await getOsdWorker();
-    const result = await worker.detect(small);
-    const deg = extractOrientationDegrees(result);
-    return normalizeRotation(deg);
-  } catch (err) {
-    logger.info('[Tesseract][OSD] detection failed, skipping rotation', err);
-    return 0;
-  }
-}
-
-function extractOrientationDegrees(result: unknown): number {
-  if (!result || typeof result !== 'object') return 0;
-  const r = result as Record<string, unknown>;
-  const direct = r.orientation_degrees;
-  if (typeof direct === 'number') return direct;
-  const nested = (r.data as Record<string, unknown> | undefined)?.orientation_degrees;
-  if (typeof nested === 'number') return nested;
-  return 0;
-}
-
-function normalizeRotation(deg: number): number {
-  const rounded = Math.round(deg / 90) * 90;
-  const mod = ((rounded % 360) + 360) % 360;
-  return mod;
 }
 
 export class OcrService {

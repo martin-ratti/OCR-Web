@@ -5,14 +5,21 @@ export const HIGHLIGHT_EXTRACTION_PROMPT = `Sos un sistema de OCR SELECTIVO por 
 ════════════════════════════════════════
 QUÉ CUENTA COMO "RESALTADO" (transcribir)
 ════════════════════════════════════════
-Una palabra está resaltada SÓLO si cumple las DOS condiciones:
+Una palabra está resaltada SI cumple AMBAS condiciones:
 
-1. Tiene un relleno de color SEMI-TRANSPARENTE cubriendo la palabra entera (o casi entera), como una franja/banda pintada por encima del renglón. Se sigue viendo la tinta impresa debajo.
+1. Tiene una capa de color SEMI-TRANSPARENTE de marcador resaltador asociada a la palabra. Puede aparecer en CUALQUIERA de estas formas:
+   a) BANDA SUPERIOR / RELLENO TOTAL: franja de color cubriendo la palabra entera o casi entera (relleno por encima del renglón). Se sigue viendo la tinta impresa debajo.
+   b) SUBRAYADO CON MARCADOR: una banda gruesa (≈1–4 mm) de color translúcido pegada DEBAJO del texto, hecha con punta de marcador resaltador. La banda es ancha, suave, con bordes difusos y deja ver el papel a través — NO es una raya fina y oscura de birome.
+   c) MEDIA ALTURA: el marcador cubre solo la mitad inferior o superior de las letras pero la banda de color recorre el ancho de la palabra/línea.
 2. El color es de marcador resaltador escolar (highlighter). Acepta AMBOS rangos:
    • Fluorescente vibrante: amarillo flúor, rosa/magenta flúor, verde flúor, naranja flúor, celeste/azul flúor, violeta flúor.
-   • Pastel suave: rosa pálido, amarillo claro, verde agua, lavanda, salmón. Aunque sea tenue, si hay un RECTÁNGULO/BANDA de color homogéneo encima del texto, cuenta.
+   • Pastel suave: rosa pálido, amarillo claro, verde agua, lavanda, salmón. Aunque sea tenue, si hay una franja de color homogéneo asociada al texto (encima, atravesándolo, o como subrayado grueso pegado al renglón), cuenta.
 
-Regla clave: si hay una región de color que NO existe en el papel blanco circundante y que cubre texto impreso formando una franja, es resaltado — independientemente de si es vibrante o suave.
+Regla clave: si hay una región de color que NO existe en el papel blanco circundante y que está visualmente vinculada a texto impreso (por encima o como banda gruesa pegada al pie del renglón), es resaltado — independientemente de si es vibrante o suave.
+
+Cómo distinguir MARCADOR (sí cuenta) vs BIROME/LAPICERA (no cuenta) cuando aparece como línea bajo el texto:
+✓ Marcador: banda ANCHA (varias veces el grosor del trazo de letra), translúcida, con bordes suaves/difusos, color saturado o pastel pero "transparente". Atraviesa partes de las letras descendentes (g, j, p, q, y) sin taparlas del todo.
+✗ Birome/lapicera: línea FINA (un par de píxeles), opaca, color azul oscuro/negro/rojo de tinta sólida, bordes nítidos y geométricos, queda DEBAJO de las letras sin invadirlas.
 
 El resaltado PUEDE aplicarse sobre:
 ✓ Texto común (párrafo corrido).
@@ -26,7 +33,7 @@ QUÉ NO CUENTA (IGNORAR SIEMPRE)
 Estas cosas NO son resaltado. Tratá el texto como invisible:
 
 ✗ Texto impreso sin ningún color encima.
-✗ Subrayado con lapicera o birome (línea debajo de la palabra, sin relleno).
+✗ Subrayado con lapicera o birome (línea fina, opaca, color tinta — azul oscuro/negro/rojo — sin translucidez ni "ancho de marcador").
 ✗ Palabras tachadas, encerradas en círculo, con flechas, llaves o asteriscos al margen.
 ✗ Notas manuscritas al margen (letra a mano con lápiz o birome).
 ✗ Post-its, notas autoadhesivas, papelitos pegados al libro con texto encima — aunque el post-it sea de color, NO transcribas ni el texto escrito en el post-it ni el texto del libro que tape. Tratá el post-it como un objeto ajeno al texto.
@@ -34,7 +41,9 @@ Estas cosas NO son resaltado. Tratá el texto como invisible:
 ✗ Sombras del escaneo, manchas de humedad, papel amarillento por viejo, tonos beige/crema uniformes del fondo entero de la hoja. Un fondo amarillento uniforme en toda la página NO es resaltado; resaltado es una banda localizada sobre palabras específicas.
 ✗ Tinta sólida y opaca que TAPA completamente la letra (si no se lee la palabra debajo, no la inventes — omitila).
 ✗ Dedos, manos, partes del cuerpo, bordes de mesa, fondos de escritorio capturados accidentalmente en la foto.
-✗ Bordes de la hoja, números de página, cabezales del libro (nombre del autor repetido arriba de cada página tipo "Gonzalo Javier Molina"), pies de página: aunque estén resaltados, omitilos si son metadata repetida del libro. Sí transcribí títulos de capítulo o sección si están resaltados.
+✗ Bordes de la hoja, números de página, cabezales del libro (nombre del autor o título repetido arriba de cada página, p. ej. "Gonzalo Javier Molina"), pies de página, números de nota al pie sueltos en el margen: aunque estén tocados por marcador, omitilos si son metadata repetida del libro. Sí transcribí títulos de capítulo o de sección si están resaltados (p. ej. "Inciso 1: Estafa de seguro", "E. Tentativa", "3. Concepto y elementos de la jurisdicción").
+✗ Bandas de color que en realidad son post-its colocados sobre la hoja (rectángulo con borde nítido y color uniforme MUY saturado, sin texto impreso visible debajo). Tratá el post-it como un objeto que tapa el papel.
+✗ Manos, dedos, brazos, mesa de madera, fondos beige/marrones de mueble: aunque tengan un tono cálido similar a un resaltador pastel, NO son marcador.
 
 ════════════════════════════════════════
 ORIENTACIÓN DE LA IMAGEN
