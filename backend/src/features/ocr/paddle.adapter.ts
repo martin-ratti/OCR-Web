@@ -16,7 +16,8 @@ const RECOGNITION_PATH = path.join(MODELS_DIR, 'rec.onnx');
 const DICTIONARY_PATH = path.join(MODELS_DIR, 'dict.txt');
 
 const PADDLE_UPSCALE_FACTOR = 3;
-const MIN_LINE_CONFIDENCE = 0.55;
+const MIN_LINE_CONFIDENCE = 0.62;
+const MIN_READABLE_TOKEN_RATIO = 0.45;
 
 let ocrInstance: Promise<Ocr> | null = null;
 
@@ -79,9 +80,14 @@ export class PaddleOcrAdapter implements OcrAdapter {
       // PP-OCRv4 latin model dict has no space token, so each line comes back
       // run-together. spanishSplitWords restores word boundaries via DP over
       // a Spanish frequency list before joining.
-      const joined = ordered
-        .map((l) => spanishSplitWords(l.text.trim()))
-        .join('\n');
+      const split = ordered.map((l) => spanishSplitWords(l.text.trim()));
+      // Drop lines that the splitter could not assemble into mostly-readable
+      // Spanish — these are paddle recognising noise (paper edge, smudge,
+      // unfamiliar font). Showing them as garbage erodes trust more than the
+      // missing text helps.
+      const readable = split.filter(isReadableSpanishLine);
+      const joined = readable.join('\n');
+      logger.info(`[Paddle] readable=${readable.length}/${split.length}`);
       return joined.length > 0 ? joined : NO_HIGHLIGHT_SENTINEL;
     } finally {
       await safeUnlink(tmp);
@@ -109,4 +115,30 @@ function boxTop(box: number[][] | undefined): number {
 function boxLeft(box: number[][] | undefined): number {
   if (!box || box.length === 0) return 0;
   return Math.min(...box.map((p) => p[0]));
+}
+
+// A line is readable when at least 45 % of its tokens are 4+ chars OR are
+// among the very common Spanish short words (articles, prepositions,
+// conjunctions, pronouns). Lines that fall below this bar are paddle's noise.
+const COMMON_SHORT_WORDS = new Set([
+  'a', 'al', 'ante', 'b', 'bajo', 'cabe', 'con', 'contra', 'cuyo', 'de', 'del',
+  'desde', 'donde', 'durante', 'e', 'el', 'él', 'en', 'entre', 'es', 'esa',
+  'ese', 'eso', 'esta', 'este', 'esto', 'fue', 'ha', 'han', 'has', 'hay', 'la',
+  'las', 'le', 'les', 'lo', 'los', 'más', 'me', 'mi', 'mis', 'mí', 'no', 'nos',
+  'o', 'os', 'para', 'pero', 'por', 'que', 'qué', 'se', 'sé', 'si', 'sí', 'sin',
+  'sobre', 'su', 'sus', 'tan', 'te', 'ti', 'tras', 'tu', 'tus', 'tú', 'un',
+  'una', 'unas', 'uno', 'unos', 'usted', 'ustedes', 'va', 'van', 'vas', 'vos',
+  'y', 'ya', 'yo',
+]);
+
+function isReadableSpanishLine(line: string): boolean {
+  const tokens = line.split(/\s+/).filter((t) => /\p{L}/u.test(t));
+  if (tokens.length === 0) return false;
+  let readable = 0;
+  for (const t of tokens) {
+    const lc = t.toLowerCase().replace(/[^\p{L}À-ɏ]/gu, '');
+    if (lc.length >= 4) readable++;
+    else if (COMMON_SHORT_WORDS.has(lc)) readable++;
+  }
+  return readable / tokens.length >= MIN_READABLE_TOKEN_RATIO;
 }
