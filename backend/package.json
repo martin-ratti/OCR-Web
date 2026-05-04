@@ -8,7 +8,7 @@
     "test:watch": "vitest",
     "lint": "eslint .",
     "dev": "ts-node-dev src/index.ts",
-    "build": "pnpm --filter @ocr-web/shared build && tsc",
+    "build": "pnpm --filter @ocr-web/shared build && pnpm models:download && tsc",
     "models:download": "node scripts/download-paddle-models.mjs"
   },
   "keywords": [],
