@@ -8,6 +8,7 @@ import { NO_HIGHLIGHT_SENTINEL } from '../../config/prompt';
 import { logger } from '../../config/logger';
 import type { OcrAdapter } from './ocr.service';
 import { buildHighlightMaskedImage, hasEnoughHighlight, upscaleMask } from './highlightMask';
+import { spanishSplitWords } from './spanishWordSplit';
 
 const MODELS_DIR = path.resolve(process.cwd(), 'models', 'paddle');
 const DETECTION_PATH = path.join(MODELS_DIR, 'det.onnx');
@@ -75,7 +76,12 @@ export class PaddleOcrAdapter implements OcrAdapter {
         (l) => (l.mean ?? 0) >= MIN_LINE_CONFIDENCE && l.text.trim().length > 0,
       );
       logger.info(`[Paddle] detected=${lines.length} kept=${ordered.length}`);
-      const joined = ordered.map((l) => l.text.trim()).join('\n');
+      // PP-OCRv4 latin model dict has no space token, so each line comes back
+      // run-together. spanishSplitWords restores word boundaries via DP over
+      // a Spanish frequency list before joining.
+      const joined = ordered
+        .map((l) => spanishSplitWords(l.text.trim()))
+        .join('\n');
       return joined.length > 0 ? joined : NO_HIGHLIGHT_SENTINEL;
     } finally {
       await safeUnlink(tmp);

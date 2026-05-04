@@ -20,6 +20,10 @@ const FILES = [
     name: 'dict.txt',
     url: 'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/latin/dict.txt',
   },
+  {
+    name: 'es_50k.txt',
+    url: 'https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/es/es_50k.txt',
+  },
 ];
 
 async function download(url, dest) {
