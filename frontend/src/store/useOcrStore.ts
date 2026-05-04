@@ -474,7 +474,7 @@ export const useOcrStore = create<OcrState>()(
     }),
     {
       name: 'ocr-web-state',
-      version: 2,
+      version: 4,
       storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
         selectedEngine: state.selectedEngine,

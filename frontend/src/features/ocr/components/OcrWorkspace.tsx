@@ -368,12 +368,12 @@ export function OcrWorkspace() {
             <div className="flex items-center gap-3 flex-wrap">
               <Select
                 value={selectedEngine}
-                onValueChange={(v) => setSelectedEngine(v as 'gemini' | 'tesseract')}
+                onValueChange={(v) => setSelectedEngine(v as 'gemini' | 'paddle')}
                 disabled={working}
               >
                 <SelectTrigger
                   aria-label="Motor de OCR"
-                  className="h-11 min-w-[232px] rounded-full border-2 border-pink-200 bg-white px-4 text-sm font-extrabold text-pink-600 shadow-sm hover:border-pink-300 focus:ring-2 focus:ring-pink-300 focus:ring-offset-1"
+                  className="h-11 min-w-[244px] rounded-full border-2 border-pink-200 bg-white px-4 text-sm font-extrabold text-pink-600 shadow-sm hover:border-pink-300 focus:ring-2 focus:ring-pink-300 focus:ring-offset-1"
                 >
                   <SelectValue placeholder="Elegí el motor" />
                 </SelectTrigger>
@@ -384,10 +384,10 @@ export function OcrWorkspace() {
                       IA (Gemini) — Alta precisión
                     </span>
                   </SelectItem>
-                  <SelectItem value="tesseract" className="font-bold">
+                  <SelectItem value="paddle" className="font-bold">
                     <span className="flex items-center gap-2">
                       <Cpu className="w-4 h-4 text-indigo-500" aria-hidden />
-                      Motor local (Tesseract) — Gratis
+                      Local (PaddleOCR) — Sin internet
                     </span>
                   </SelectItem>
                 </SelectContent>
