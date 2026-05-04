@@ -24,7 +24,7 @@ class StubAdapter implements OcrAdapter {
 }
 
 function appWith(adapter: OcrAdapter) {
-  const service = new OcrService({ gemini: adapter, tesseract: adapter });
+  const service = new OcrService({ gemini: adapter, paddle: adapter });
   const controller = new OcrController(service);
   return createApp({ ocrController: controller, enableGlobalLimiter: false });
 }
@@ -34,14 +34,21 @@ describe('POST /api/ocr/extract', () => {
     process.env.NODE_ENV = 'test';
   });
 
-  it('returns 200 and text on success', async () => {
+  it('returns 200 and text on success (default engine)', async () => {
     const res = await request(appWith(new StubAdapter('ok')))
       .post('/api/ocr/extract')
-      .attach('image', PNG_FIXTURE, { filename: 'a.png', contentType: 'image/png' })
-      .field('engine', 'gemini');
+      .attach('image', PNG_FIXTURE, { filename: 'a.png', contentType: 'image/png' });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'success', text: 'TEXTO RESALTADO' });
     expect(res.headers['x-request-id']).toBeTruthy();
+  });
+
+  it('accepts engine=paddle field', async () => {
+    const res = await request(appWith(new StubAdapter('ok')))
+      .post('/api/ocr/extract')
+      .attach('image', PNG_FIXTURE, { filename: 'a.png', contentType: 'image/png' })
+      .field('engine', 'paddle');
+    expect(res.status).toBe(200);
   });
 
   it('normalizes engine casing/whitespace', async () => {
@@ -56,23 +63,21 @@ describe('POST /api/ocr/extract', () => {
     const res = await request(appWith(new StubAdapter('ok')))
       .post('/api/ocr/extract')
       .attach('image', PNG_FIXTURE, { filename: 'a.png', contentType: 'image/png' })
-      .field('engine', 'gpt-4');
+      .field('engine', 'tesseract');
     expect(res.status).toBe(400);
     expect(res.body.status).toBe('error');
   });
 
   it('returns 400 when no file uploaded', async () => {
     const res = await request(appWith(new StubAdapter('ok')))
-      .post('/api/ocr/extract')
-      .field('engine', 'gemini');
+      .post('/api/ocr/extract');
     expect(res.status).toBe(400);
   });
 
   it('maps upstream rate-limit to 429 with sanitized message', async () => {
     const res = await request(appWith(new StubAdapter('rate')))
       .post('/api/ocr/extract')
-      .attach('image', PNG_FIXTURE, { filename: 'a.png', contentType: 'image/png' })
-      .field('engine', 'gemini');
+      .attach('image', PNG_FIXTURE, { filename: 'a.png', contentType: 'image/png' });
     expect(res.status).toBe(429);
     expect(res.body.warnings[0]).not.toMatch(/RESOURCE_EXHAUSTED/);
   });
@@ -80,8 +85,7 @@ describe('POST /api/ocr/extract', () => {
   it('does NOT leak internal error details to client', async () => {
     const res = await request(appWith(new StubAdapter('boom')))
       .post('/api/ocr/extract')
-      .attach('image', PNG_FIXTURE, { filename: 'a.png', contentType: 'image/png' })
-      .field('engine', 'gemini');
+      .attach('image', PNG_FIXTURE, { filename: 'a.png', contentType: 'image/png' });
     expect(res.status).toBe(500);
     expect(JSON.stringify(res.body)).not.toMatch(/key\.json|Internal Gemini SDK/);
   });

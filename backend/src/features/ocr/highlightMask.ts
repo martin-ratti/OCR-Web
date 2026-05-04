@@ -34,7 +34,9 @@ export interface HighlightMaskResult {
 export async function buildHighlightMaskedImage(
   imageBuffer: Buffer,
 ): Promise<HighlightMaskResult> {
-  const base = sharp(imageBuffer).rotate();
+  // .rotate() applies any EXIF orientation; .normalise() expands tonal range so
+  // that text/highlight contrast is consistent regardless of camera exposure.
+  const base = sharp(imageBuffer).rotate().normalise();
   const { data, info } = await base
     .ensureAlpha()
     .raw()

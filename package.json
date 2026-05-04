@@ -12,7 +12,9 @@
   },
   "pnpm": {
     "onlyBuiltDependencies": [
-      "sharp"
+      "sharp",
+      "onnxruntime-node",
+      "protobufjs"
     ]
   }
 }

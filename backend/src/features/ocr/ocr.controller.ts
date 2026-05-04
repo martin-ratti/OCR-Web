@@ -27,7 +27,7 @@ export class OcrController {
         : undefined;
       const parsed = ExtractRequestSchema.safeParse({ engine: rawEngine });
       if (!parsed.success) {
-        throw new HttpError(400, 'Engine inválido. Usá "gemini" o "tesseract".');
+        throw new HttpError(400, 'Engine inválido. Usá "gemini" o "paddle".');
       }
       const engine: OcrEngine = parsed.data.engine ?? 'gemini';
 
