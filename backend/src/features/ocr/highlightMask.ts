@@ -114,7 +114,15 @@ export async function upscaleMask(png: Buffer, factor = 2): Promise<Buffer> {
   const meta = await sharp(png).metadata();
   const w = (meta.width ?? 0) * factor;
   const h = (meta.height ?? 0) * factor;
-  return sharp(png).resize(w, h, { kernel: 'lanczos3' }).png().toBuffer();
+  // After upscale we apply a mild unsharp to crispen edges that the lanczos
+  // interpolation softens, then a 2-px median to suppress speckle noise that
+  // OCR engines tend to read as stray punctuation.
+  return sharp(png)
+    .resize(w, h, { kernel: 'lanczos3' })
+    .sharpen({ sigma: 0.7, m1: 0.6, m2: 1.0 })
+    .median(1)
+    .png()
+    .toBuffer();
 }
 
 function computeOtsuThreshold(histogram: Uint32Array, total: number): number {
