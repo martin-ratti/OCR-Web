@@ -12,13 +12,16 @@ Esta guía te explica cómo subir el proyecto a internet de forma gratuita usand
    - **Name**: `ocr-backend` (o el que quieras)
    - **Root Directory**: *(dejar vacío — usar la raíz del repo)*
    - **Environment**: `Node`
-   - **Build Command**: `pnpm install && pnpm --filter backend build`
+   - **Build Command**: `pnpm install && pnpm --filter backend models:download && pnpm --filter backend build`
    - **Start Command**: `node backend/dist/index.js`
+
+   > [!IMPORTANT]
+   > El paso `models:download` baja los ONNX de PaddleOCR (~10 MB) a `backend/models/paddle/`. Si lo omitís, el motor offline (`engine=paddle`) tirará 500 cuando alguien lo seleccione.
 
    > [!IMPORTANT]
    > Render **debe** correr desde la raíz del repo, no desde `backend/`. Este monorepo usa `pnpm workspaces` y `@ocr-web/shared` está declarado como `workspace:*`; si pnpm arranca dentro de `backend/` no ve el `pnpm-workspace.yaml` de la raíz y el install falla. El script `build` del backend ya compila `@ocr-web/shared` antes del `tsc`, así que no hace falta pasos extra.
 4. **Variables de Entorno (Environment Variables)**:
-   - `GEMINI_API_KEY`: Tu clave de Google AI Studio. **Obligatoria** — el servidor no arranca si falta.
+   - `GEMINI_API_KEY`: Tu clave de Google AI Studio. **Recomendada** — sin ella, los requests con `engine=gemini` (default) tiran 500. El motor offline (`engine=paddle`) funciona sin key, pero la calidad es inferior.
    - `NODE_ENV`: `production`
    - `ALLOWED_ORIGINS`: Lista separada por comas de orígenes autorizados. Ej: `https://tu-app.vercel.app,https://tudominio.com`. Si omitís, sólo aceptará `localhost`.
    - `PORT` *(opcional)*: Render lo setea solo. No lo pongas salvo que sepas lo que hacés.

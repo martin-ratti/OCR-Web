@@ -25,16 +25,22 @@ Frontend (`pnpm --filter frontend <cmd>` or run inside `frontend/`):
 - `pnpm preview` — preview prod build
 
 Backend env lives in `backend/.env`:
-- `GEMINI_API_KEY` — optional at boot (Zod `.optional()` in `env.ts`). Tesseract engine works without it; only the Gemini adapter throws if a request hits it with no key set.
+- `GEMINI_API_KEY` — optional at boot (Zod `.optional()` in `env.ts`). Required for the **gemini** engine; the adapter throws on first request if missing. The **paddle** offline engine works with no key.
 - `ALLOWED_ORIGINS` — comma-separated CORS whitelist; defaults to `http://localhost:5173,http://localhost:4173`. Use `*` only in dev.
 - `NODE_ENV` — `development` | `production` | `test` (default `development`).
 - `PORT` — default `3001`.
+
+PaddleOCR offline engine needs three model files in `backend/models/paddle/` (gitignored). Run once after install:
+```
+pnpm --filter backend models:download
+```
+Files (~10 MB total): `det.onnx` (PP-OCRv5 v3 detection), `rec.onnx` (PP-OCRv4 latin recognition), `dict.txt` (charset), plus `es_50k.txt` (Spanish word frequency table for the post-recognition word splitter — see *Architecture*).
 
 Frontend reads `VITE_API_URL` (base URL only — do **not** include `/api`; trailing slashes are stripped by `shared/api.ts`). Defaults to `http://localhost:3001`.
 
 `rules.json` at the repo root is tracked (project-level rule config — don't delete as housekeeping). `scratch/` is gitignored workspace for local experiments; treat files there as throwaway and don't rely on them.
 
-Root `package.json` pins `pnpm.onlyBuiltDependencies: ["sharp"]` — sharp needs a native postinstall and pnpm blocks build scripts by default. If install fails with a sharp-missing error on a new machine, that list is the reason you're looking at.
+Root `package.json` pins `pnpm.onlyBuiltDependencies: ["sharp", "onnxruntime-node", "protobufjs"]` — these have native postinstalls and pnpm blocks build scripts by default. If install fails with a sharp-missing or onnxruntime-missing error on a new machine, that list is the reason you're looking at.
 
 ## Architecture ("EstacionAR")
 
@@ -48,16 +54,16 @@ Middleware order in `createApp`: `helmet()` → `requestId` → `metricsMiddlewa
 
 Per-feature layering under `features/<feature>/`:
 
-`router` (per-route middlewares: `ocrLimiter` + `uploadImage.single`) → `controller` (HTTP shape; parses `engine` field with `ExtractRequestSchema`, throws `HttpError`/delegates to `next(err)`) → `service` (picks adapter per `OcrEngine`, lazily constructs the chosen one; accepts override map for DI) → `adapter` (`GeminiOcrAdapter` or `TesseractOcrAdapter`) → `schema` (Zod contracts re-exported from `@ocr-web/shared`).
+`router` (per-route middlewares: `ocrLimiter` + `uploadImage.single`) → `controller` (HTTP shape; parses `engine` field with `ExtractRequestSchema`, throws `HttpError`/delegates to `next(err)`) → `service` (picks adapter per `OcrEngine`, lazily constructs the chosen one; accepts override map for DI) → `adapter` (`GeminiOcrAdapter` or `PaddleOcrAdapter`) → `schema` (Zod contracts re-exported from `@ocr-web/shared`).
 
-**Dual OCR engine.** Requests carry an `engine` form field (`'gemini'` default, or `'tesseract'`). `OcrService` lazily constructs and memoizes whichever adapter the request asks for:
-- `GeminiOcrAdapter` — calls `@google/genai` with the pinned model, `temperature: 0`, `topP: 0.1`, `thinkingBudget: 1024`, 60s timeout (raced against SDK).
-- `TesseractOcrAdapter` — fully local: `sharp` auto-orients, runs a tesseract.js `osd` worker to detect 90°-multiple rotation, then `highlightMask.ts` builds an HSV-band mask (yellow/green fluo + pink/salmon pastel) and rasterizes only the highlighted regions at 300 DPI. If coverage is below `MIN_HIGHLIGHT_COVERAGE` (0.2%), returns `NO_HIGHLIGHT_SENTINEL` without calling OCR. Recognition runs `spa+eng` LSTM with per-word/line confidence filters; if confidence < 55, retries with a 180° flip. Workers are cached in `node_modules/.cache/tesseract` and reused across requests (module-level promises).
+**Dual OCR engine.** Requests carry an `engine` form field (`'gemini'` default, or `'paddle'`). `OcrService` lazily constructs and memoizes whichever adapter the request asks for:
+- `GeminiOcrAdapter` — calls `@google/genai` with the pinned model, `temperature: 0`, `topP: 0.1`, `thinkingBudget: 1024`, 60s timeout (raced against SDK). Best quality (~99%) but rate-limited by the free tier (15 RPM / 1000 RPD per project).
+- `PaddleOcrAdapter` — fully local: `sharp` auto-orients, `highlightMask.ts` builds an HSV-band mask of highlighted regions, mask is upscaled 3× and written to a temp PNG, then `@gutenye/ocr-node` runs PP-OCRv4 latin detection + recognition via `onnxruntime-node`. Lines are sorted top-to-bottom (then left-to-right within ~12px Y window), filtered by `mean >= 0.55` confidence, then run through `spanishSplitWords` (the latin model's dict has no space token, so each line comes back as a concatenated blob — the wordninja-style segmenter restores word boundaries via DP over a 50k Spanish frequency table). Initial worker load (~3-5 s) is cached in a module-level promise. Quality ~85-95% on clean print, drops sharply on degraded scans / OCR typos (the splitter fragments unrecognized runs letter-by-letter, since it can't infer non-Spanish words).
 
-**Highlight contract is shared.** Both adapters must respect `NO_HIGHLIGHT_SENTINEL` (`"No se detectó texto resaltado en esta imagen."`). The Tesseract mask exists so the local engine matches the Gemini prompt's chromatic-filter semantics — if you change the prompt to look at non-highlighted text, you must also relax `highlightMask.ts` or the two engines will diverge silently.
+**Highlight contract is shared.** Both adapters must respect `NO_HIGHLIGHT_SENTINEL` (`"No se detectó texto resaltado en esta imagen."`). The Paddle mask exists so the local engine matches the Gemini prompt's chromatic-filter semantics — if you change the prompt to look at non-highlighted text, you must also relax `highlightMask.ts` or the two engines will diverge silently.
 
 Shared config in `backend/src/config/`:
-- `env.ts` — Zod-validated env. `GEMINI_API_KEY` is **optional** at boot; the server only throws if a request actually hits the Gemini adapter without a key. Tesseract works with no key. (The older CLAUDE.md text said "fails fast at boot" — that's no longer true since the Tesseract engine landed.)
+- `env.ts` — Zod-validated env. `GEMINI_API_KEY` is `.optional()` at boot. The server only throws if a request hits the Gemini adapter without a key. The Paddle engine works with no key — useful as a fallback when the Gemini quota is exhausted.
 - `prompt.ts` — `HIGHLIGHT_EXTRACTION_PROMPT` + `NO_HIGHLIGHT_SENTINEL`. Tune prompt here, never the model.
 - `logger.ts` — timestamped console wrapper; `info` gated by `NODE_ENV`. `withRequestId(id)` returns a scoped logger for per-request correlation.
 
@@ -75,7 +81,7 @@ Health: `GET /health` returns `{ status: 'ok', timestamp }`. Use it for Render u
 Feature-Sliced-Design-lite. Layers:
 - `features/ocr/components/` — presentation (Shadcn/Radix + Tailwind). `OcrDropzone` and `OcrWorkspace` are the two top-level states.
 - `store/useOcrStore.ts` — Zustand store; owns queue, per-file status, global progress, abort controller, and the upload loops (`processAll` / `processOne` / `processSelected` / `retryAllErrors` / `cancel` / `clearAll` with undo). `MAX_FILES = 200` ceiling; `INTER_FILE_DELAY_MS = 5000`; `MAX_ATTEMPTS = 5`.
-- **Persistence.** Wrapped with `zustand/middleware` `persist` (`name: 'ocr-web-state'`, `version: 2`, `localStorage`). `partialize` persists only `selectedEngine`, `fontSize`, and `textCache`. `textCache` is keyed by `${file.name}::${file.size}` so re-adding an already-OCR'd file rehydrates the result without another API call — do not bypass this cache when wiring new ingestion paths. If you change `textCache` shape, bump the persist `version`.
+- **Persistence.** Wrapped with `zustand/middleware` `persist` (`name: 'ocr-web-state'`, `version: 4`, `localStorage`). `partialize` persists only `selectedEngine`, `fontSize`, and `textCache`. `textCache` is keyed by `${file.name}::${file.size}` so re-adding an already-OCR'd file rehydrates the result without another API call — do not bypass this cache when wiring new ingestion paths. If you change `textCache` shape, bump the persist `version`.
 - **Prewarm pipeline.** While file *i* is in Gemini, file *i+1* is pre-compressed in parallel (`ensureCompressed` stores the resulting `File` on the queue entry). Keep this; losing it ~doubles wall-clock on batches.
 - **Undo.** `clearAll` snapshots the queue + active id and keeps it for 12s before revoking preview URLs. `restoreCleared` rehydrates if called before expiry. If you remove files programmatically, use `removeFiles(ids)` so preview URLs are revoked.
 - `shared/api.ts` — cross-cutting: `getApiBase` trailing-slash normalizer, `isRateLimitMessage`, `processOcr(file, name, engine, signal)` (the only place that builds the multipart request), re-exports `OcrEngine` type from `@ocr-web/shared`.
@@ -109,7 +115,7 @@ The current prompt is a chromatic-filter instruction: extract only text that is 
 
 ## Deployment
 
-- **Backend** → Render.com web service. **Root directory must be empty (repo root), NOT `backend/`** — pnpm workspaces need to see `pnpm-workspace.yaml` at the root to resolve `@ocr-web/shared` (declared as `workspace:*`). Build `pnpm install && pnpm --filter backend build`, start `node backend/dist/index.js`. Env: `GEMINI_API_KEY` (optional but required for the Gemini engine), `NODE_ENV=production`, `ALLOWED_ORIGINS=https://<your-vercel-url>`. Free tier sleeps after ~15 min idle.
+- **Backend** → Render.com web service. **Root directory must be empty (repo root), NOT `backend/`** — pnpm workspaces need to see `pnpm-workspace.yaml` at the root to resolve `@ocr-web/shared` (declared as `workspace:*`). Build `pnpm install && pnpm --filter backend models:download && pnpm --filter backend build` (the `models:download` step pulls the Paddle ONNX models into `backend/models/paddle/` so the offline engine works in production). Start `node backend/dist/index.js`. Env: `GEMINI_API_KEY` (optional but required if anyone selects the Gemini engine), `NODE_ENV=production`, `ALLOWED_ORIGINS=https://<your-vercel-url>`. Free tier sleeps after ~15 min idle.
 - **Frontend** → Vercel. Root `frontend`, Vite preset (default install + build — Vercel runs `pnpm install` from repo root and resolves the workspace). Env: `VITE_API_URL` = Render URL, no trailing `/api`.
 - **CORS whitelist gotcha:** after deploying the frontend, update `ALLOWED_ORIGINS` on the backend with the Vercel URL or every request will be blocked.
 
