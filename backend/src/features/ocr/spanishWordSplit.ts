@@ -109,11 +109,12 @@ function segmentRun(run: string): SegmentResult {
 // Scan a recognition output string and segment any run of >= 4 consecutive
 // letters that the dictionary doesn't recognize as a single word. Punctuation,
 // digits, single-letter tokens, and existing spaces pass through untouched.
+// Then a second pass tries to fuse adjacent short fragments back into known
+// words — useful when Paddle inserted spaces inside a single real word
+// (e.g. "ar tí cul o" → "artículo").
 export function spanishSplitWords(input: string): string {
   if (!input) return input;
-  loadCosts();
-  // Tokenize: a "letter run" is a maximal run of unicode letters/digits/dashes;
-  // everything else (spaces, punctuation) is preserved verbatim.
+  const dict = loadCosts();
   let out = '';
   const re = /([\p{L}\p{N}À-ɏ'-]+)|([^\p{L}\p{N}À-ɏ'-]+)/gu;
   let m: RegExpExecArray | null;
@@ -129,12 +130,57 @@ export function spanishSplitWords(input: string): string {
       out += word;
       continue;
     }
-    if (costs && costs.has(word.toLowerCase())) {
+    if (dict.has(word.toLowerCase())) {
       out += word;
       continue;
     }
     const { text } = segmentRun(word);
     out += text;
   }
-  return out;
+  return mergeAdjacentFragments(out, dict);
+}
+
+// Defragmenter: walks each line and tries to glue back together runs of short
+// tokens (≤4 chars each) when the concatenation is a known Spanish word. Keeps
+// case from the original tokens. Bounded to 6-token windows to keep this O(n).
+function mergeAdjacentFragments(text: string, dict: Map<string, number>): string {
+  if (dict.size === 0) return text;
+  return text
+    .split('\n')
+    .map((line) => {
+      // Split on whitespace but keep punctuation attached to tokens.
+      const tokens = line.split(' ');
+      const out: string[] = [];
+      let i = 0;
+      while (i < tokens.length) {
+        let merged = false;
+        const maxJ = Math.min(tokens.length, i + 6);
+        // Try the longest window first so we prefer "artículo" over "artí".
+        for (let j = maxJ; j > i + 1; j--) {
+          const window = tokens.slice(i, j);
+          if (!window.every((t) => t.length > 0 && t.length <= 4)) continue;
+          // Refuse to merge any window where ALL tokens are individually known
+          // Spanish words — that would happily fuse "a los" into "alos" using
+          // typos that snuck into the subtitle-derived frequency table. We only
+          // glue back fragments (at least one token must be a non-word).
+          const allValid = window.every((t) => dict.has(t.toLowerCase()));
+          if (allValid) continue;
+          const candidate = window.join('');
+          if (candidate.length < 4 || candidate.length > 22) continue;
+          if (!/^[\p{L}\p{N}À-ɏ'-]+$/u.test(candidate)) continue;
+          if (dict.has(candidate.toLowerCase())) {
+            out.push(candidate);
+            i = j;
+            merged = true;
+            break;
+          }
+        }
+        if (!merged) {
+          out.push(tokens[i]);
+          i++;
+        }
+      }
+      return out.join(' ');
+    })
+    .join('\n');
 }
