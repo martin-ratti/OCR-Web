@@ -10,7 +10,10 @@ import type { OcrAdapter } from './ocr.service';
 import { buildHighlightMaskedImage, hasEnoughHighlight, upscaleMask } from './highlightMask';
 import { spanishSplitWords } from './spanishWordSplit';
 
-const MODELS_DIR = path.resolve(process.cwd(), 'models', 'paddle');
+// Anchor on this file's location, not cwd. Render starts from repo root
+// (cwd = root) but models live under backend/models/paddle/. Same depth
+// from src/ and dist/ so this resolves correctly in both modes.
+const MODELS_DIR = path.resolve(__dirname, '..', '..', '..', 'models', 'paddle');
 const DETECTION_PATH = path.join(MODELS_DIR, 'det.onnx');
 const RECOGNITION_PATH = path.join(MODELS_DIR, 'rec.onnx');
 const DICTIONARY_PATH = path.join(MODELS_DIR, 'dict.txt');

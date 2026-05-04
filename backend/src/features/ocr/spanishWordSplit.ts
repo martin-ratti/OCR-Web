@@ -9,8 +9,9 @@ import path from 'node:path';
 // (e.g. "Elabusosignificalaexplotación..."). This module restores word
 // boundaries via dynamic programming over a Spanish word frequency table.
 
-const FREQ_FILE_PRIMARY = path.resolve(process.cwd(), 'models', 'paddle', 'es_full.txt');
-const FREQ_FILE_FALLBACK = path.resolve(process.cwd(), 'models', 'paddle', 'es_50k.txt');
+const MODELS_DIR = path.resolve(__dirname, '..', '..', '..', 'models', 'paddle');
+const FREQ_FILE_PRIMARY = path.join(MODELS_DIR, 'es_full.txt');
+const FREQ_FILE_FALLBACK = path.join(MODELS_DIR, 'es_50k.txt');
 const MIN_FREQ_FULL = 10; // filter es_full.txt noise (typos, single-occurrence proper nouns)
 const MAX_WORD_LEN = 22;
 const UNKNOWN_CHAR_COST = 9e6; // very high; per character of unparseable run
