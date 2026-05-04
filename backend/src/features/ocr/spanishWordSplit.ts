@@ -9,7 +9,9 @@ import path from 'node:path';
 // (e.g. "Elabusosignificalaexplotación..."). This module restores word
 // boundaries via dynamic programming over a Spanish word frequency table.
 
-const FREQ_FILE = path.resolve(process.cwd(), 'models', 'paddle', 'es_50k.txt');
+const FREQ_FILE_PRIMARY = path.resolve(process.cwd(), 'models', 'paddle', 'es_full.txt');
+const FREQ_FILE_FALLBACK = path.resolve(process.cwd(), 'models', 'paddle', 'es_50k.txt');
+const MIN_FREQ_FULL = 10; // filter es_full.txt noise (typos, single-occurrence proper nouns)
 const MAX_WORD_LEN = 22;
 const UNKNOWN_CHAR_COST = 9e6; // very high; per character of unparseable run
 
@@ -18,15 +20,25 @@ let warnedMissing = false;
 
 function loadCosts(): Map<string, number> {
   if (costs) return costs;
-  if (!fs.existsSync(FREQ_FILE)) {
+  let activeFile = '';
+  let minFreq = 1;
+  if (fs.existsSync(FREQ_FILE_PRIMARY)) {
+    activeFile = FREQ_FILE_PRIMARY;
+    minFreq = MIN_FREQ_FULL;
+  } else if (fs.existsSync(FREQ_FILE_FALLBACK)) {
+    activeFile = FREQ_FILE_FALLBACK;
+    minFreq = 1;
+  } else {
     if (!warnedMissing) {
-      console.warn(`[spanishWordSplit] frequency file missing at ${FREQ_FILE}; word splitting disabled`);
+      console.warn(
+        `[spanishWordSplit] frequency files missing (looked for ${FREQ_FILE_PRIMARY} and ${FREQ_FILE_FALLBACK}); word splitting disabled`,
+      );
       warnedMissing = true;
     }
     costs = new Map();
     return costs;
   }
-  const lines = fs.readFileSync(FREQ_FILE, 'utf8').split('\n');
+  const lines = fs.readFileSync(activeFile, 'utf8').split('\n');
   const map = new Map<string, number>();
   let totalFreq = 0;
   const entries: Array<[string, number]> = [];
@@ -34,7 +46,7 @@ function loadCosts(): Map<string, number> {
     const [word, freqStr] = line.split(/\s+/);
     if (!word || !freqStr) continue;
     const freq = Number(freqStr);
-    if (!Number.isFinite(freq) || freq <= 0) continue;
+    if (!Number.isFinite(freq) || freq < minFreq) continue;
     entries.push([word.toLowerCase(), freq]);
     totalFreq += freq;
   }
@@ -44,6 +56,7 @@ function loadCosts(): Map<string, number> {
     map.set(word, logTotal - Math.log(freq));
   }
   costs = map;
+  console.log(`[spanishWordSplit] loaded ${map.size} words from ${path.basename(activeFile)}`);
   return map;
 }
 

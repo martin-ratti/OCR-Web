@@ -24,6 +24,10 @@ const FILES = [
     name: 'es_50k.txt',
     url: 'https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/es/es_50k.txt',
   },
+  {
+    name: 'es_full.txt',
+    url: 'https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/es/es_full.txt',
+  },
 ];
 
 async function download(url, dest) {
