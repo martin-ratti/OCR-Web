@@ -3,7 +3,7 @@ import { env } from '../../config/env';
 import { HIGHLIGHT_EXTRACTION_PROMPT } from '../../config/prompt';
 import { logger } from '../../config/logger';
 import type { OcrEngine } from '@ocr-web/shared';
-import { PaddleOcrAdapter } from './paddle.adapter';
+import { HttpError } from '../../middlewares/errorHandler';
 
 const MODEL_ID = 'gemini-2.5-flash-lite';
 const GEMINI_TIMEOUT_MS = 60_000;
@@ -59,7 +59,6 @@ export class GeminiOcrAdapter implements OcrAdapter {
 export class OcrService {
   private readonly overrides: Partial<Record<OcrEngine, OcrAdapter>>;
   private geminiAdapter: OcrAdapter | null = null;
-  private paddleAdapter: OcrAdapter | null = null;
 
   constructor(adapters?: Partial<Record<OcrEngine, OcrAdapter>>) {
     this.overrides = adapters ?? {};
@@ -71,9 +70,14 @@ export class OcrService {
       if (!this.geminiAdapter) this.geminiAdapter = new GeminiOcrAdapter();
       return this.geminiAdapter;
     }
-    if (this.overrides.paddle) return this.overrides.paddle;
-    if (!this.paddleAdapter) this.paddleAdapter = new PaddleOcrAdapter();
-    return this.paddleAdapter;
+    // Paddle fue retirado del backend: el motor local ahora corre en el navegador
+    // (tesseract.js). El frontend nunca debería llegar acá con engine=paddle,
+    // pero si lo hace devolvemos 410 Gone para señalar que el endpoint no existe.
+    if (engine === 'paddle') {
+      if (this.overrides.paddle) return this.overrides.paddle;
+      throw new HttpError(410, 'El motor "paddle" se ejecuta ahora en el navegador. No envíes engine=paddle al backend.');
+    }
+    throw new HttpError(400, `Engine no soportado: ${engine}`);
   }
 
   async extractTextFromBuffer(

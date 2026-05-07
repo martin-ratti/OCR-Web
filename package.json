@@ -9,12 +9,5 @@
   },
   "devDependencies": {
     "concurrently": "^8.2.2"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "sharp",
-      "onnxruntime-node",
-      "protobufjs"
-    ]
   }
 }

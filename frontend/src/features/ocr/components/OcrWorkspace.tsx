@@ -33,6 +33,7 @@ import { Badge } from '@/components/ui/badge';
 
 import pandaImg from '../../../assets/panda.png';
 import monkeyImg from '../../../assets/monkey.png';
+import { subscribeTesseractProgress, type TesseractProgress } from '../../../lib/tesseractAdapter';
 
 const MIN_FONT = 12;
 const MAX_FONT = 28;
@@ -70,6 +71,9 @@ export function OcrWorkspace() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [tessProgress, setTessProgress] = useState<TesseractProgress | null>(null);
+
+  useEffect(() => subscribeTesseractProgress(setTessProgress), []);
   const editorRef = useRef<ExtractedEditorHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -387,7 +391,7 @@ export function OcrWorkspace() {
                   <SelectItem value="paddle" className="font-bold">
                     <span className="flex items-center gap-2">
                       <Cpu className="w-4 h-4 text-indigo-500" aria-hidden />
-                      Local (PaddleOCR) — Sin internet
+                      Local (en tu navegador) — Sin cuota
                     </span>
                   </SelectItem>
                 </SelectContent>
@@ -532,6 +536,27 @@ export function OcrWorkspace() {
               value={globalProgress}
               aria-label="Progreso del lote"
               className="h-2 bg-pink-100 [&>div]:bg-pink-400"
+            />
+          </div>
+        )}
+
+        {selectedEngine === 'paddle' && tessProgress && tessProgress.status === 'loading' && (
+          <div
+            className="bg-indigo-50 border-b-2 border-indigo-100 px-4 py-3"
+            role="status"
+            aria-live="polite"
+          >
+            <div className="flex items-center justify-between text-xs font-extrabold text-indigo-600 mb-1.5">
+              <span className="inline-flex items-center gap-1.5">
+                <Cpu className="w-3.5 h-3.5 motion-safe:animate-pulse" aria-hidden />
+                Cargando motor local (1ª vez, ~10 MB)...
+              </span>
+              <span>{Math.round(tessProgress.progress * 100)}%</span>
+            </div>
+            <Progress
+              value={Math.round(tessProgress.progress * 100)}
+              aria-label="Progreso de carga del motor local"
+              className="h-2 bg-indigo-100 [&>div]:bg-indigo-400"
             />
           </div>
         )}

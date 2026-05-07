@@ -3,7 +3,4 @@ dist/
 .env
 .DS_Store
 
-# Local OCR runtime artifacts
-backend/models/paddle/*.onnx
-backend/models/paddle/*.txt
 scratch/

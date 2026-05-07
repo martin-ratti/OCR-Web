@@ -23,8 +23,10 @@ class StubAdapter implements OcrAdapter {
   }
 }
 
-function appWith(adapter: OcrAdapter) {
-  const service = new OcrService({ gemini: adapter, paddle: adapter });
+function appWith(adapter: OcrAdapter, opts?: { withPaddle?: boolean }) {
+  const overrides: Partial<Record<'gemini' | 'paddle', OcrAdapter>> = { gemini: adapter };
+  if (opts?.withPaddle) overrides.paddle = adapter;
+  const service = new OcrService(overrides);
   const controller = new OcrController(service);
   return createApp({ ocrController: controller, enableGlobalLimiter: false });
 }
@@ -43,8 +45,17 @@ describe('POST /api/ocr/extract', () => {
     expect(res.headers['x-request-id']).toBeTruthy();
   });
 
-  it('accepts engine=paddle field', async () => {
+  it('rejects engine=paddle with 410 (motor movido al cliente)', async () => {
     const res = await request(appWith(new StubAdapter('ok')))
+      .post('/api/ocr/extract')
+      .attach('image', PNG_FIXTURE, { filename: 'a.png', contentType: 'image/png' })
+      .field('engine', 'paddle');
+    expect(res.status).toBe(410);
+    expect(res.body.status).toBe('error');
+  });
+
+  it('still allows engine=paddle when explicitly overridden (DI seam for tests)', async () => {
+    const res = await request(appWith(new StubAdapter('ok'), { withPaddle: true }))
       .post('/api/ocr/extract')
       .attach('image', PNG_FIXTURE, { filename: 'a.png', contentType: 'image/png' })
       .field('engine', 'paddle');

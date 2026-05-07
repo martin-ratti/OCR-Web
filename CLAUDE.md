@@ -14,7 +14,7 @@ From repo root:
 
 Backend (`pnpm --filter backend <cmd>` or run inside `backend/`):
 - `pnpm dev` — `ts-node-dev src/index.ts`, listens on `PORT` or `3001`
-- `pnpm build` — runs `pnpm --filter @ocr-web/shared build` first, then `tsc` → `dist/`; production start is `node dist/index.js`
+- `pnpm build` — runs `pnpm --filter @ocr-web/shared build`, then `tsc` → `dist/`; production start is `node dist/index.js`.
 - `pnpm test` / `pnpm test:watch` — Vitest + Supertest. The single test file (`backend/tests/ocr.test.ts`) exercises `/api/ocr/extract` with a stub `OcrAdapter` injected via `createApp({ ocrController })`. The factory pattern is there specifically so tests can swap the Gemini SDK out — preserve it.
 - `pnpm lint` — ESLint.
 
@@ -25,22 +25,18 @@ Frontend (`pnpm --filter frontend <cmd>` or run inside `frontend/`):
 - `pnpm preview` — preview prod build
 
 Backend env lives in `backend/.env`:
-- `GEMINI_API_KEY` — optional at boot (Zod `.optional()` in `env.ts`). Required for the **gemini** engine; the adapter throws on first request if missing. The **paddle** offline engine works with no key.
+- `GEMINI_API_KEY` — optional at boot (Zod `.optional()` in `env.ts`). Required for the **gemini** engine; the adapter throws on first request if missing. The local engine (`paddle` value in the UI / shared schema) runs entirely in the browser via Tesseract.js, so it works with no backend key — and in fact never hits the backend at all.
 - `ALLOWED_ORIGINS` — comma-separated CORS whitelist; defaults to `http://localhost:5173,http://localhost:4173`. Use `*` only in dev.
 - `NODE_ENV` — `development` | `production` | `test` (default `development`).
 - `PORT` — default `3001`.
 
-PaddleOCR offline engine needs three model files in `backend/models/paddle/` (gitignored). Run once after install:
-```
-pnpm --filter backend models:download
-```
-Files (~10 MB total): `det.onnx` (PP-OCRv5 v3 detection), `rec.onnx` (PP-OCRv4 latin recognition), `dict.txt` (charset), plus `es_50k.txt` (Spanish word frequency table for the post-recognition word splitter — see *Architecture*).
+The local engine (`engine === 'paddle'` in the persisted UI state) runs **entirely in the browser** via Tesseract.js — no server-side ONNX, no model download step, no Render OOM risk. The `paddle` enum value is kept for backwards compatibility with persisted client state (`textCache` keys) and the `OcrEngineSchema` in `@ocr-web/shared`; the backend rejects it with HTTP 410 (`OcrService.getAdapter` throws) so any direct API call with `engine=paddle` fails loudly.
 
 Frontend reads `VITE_API_URL` (base URL only — do **not** include `/api`; trailing slashes are stripped by `shared/api.ts`). Defaults to `http://localhost:3001`.
 
 `rules.json` at the repo root is tracked (project-level rule config — don't delete as housekeeping). `scratch/` is gitignored workspace for local experiments; treat files there as throwaway and don't rely on them.
 
-Root `package.json` pins `pnpm.onlyBuiltDependencies: ["sharp", "onnxruntime-node", "protobufjs"]` — these have native postinstalls and pnpm blocks build scripts by default. If install fails with a sharp-missing or onnxruntime-missing error on a new machine, that list is the reason you're looking at.
+Root `package.json` no longer pins any `onlyBuiltDependencies` — the previous entries (`sharp`, `onnxruntime-node`, `protobufjs`) were only required by the now-removed server-side Paddle engine.
 
 ## Architecture ("EstacionAR")
 
@@ -54,16 +50,16 @@ Middleware order in `createApp`: `helmet()` → `requestId` → `metricsMiddlewa
 
 Per-feature layering under `features/<feature>/`:
 
-`router` (per-route middlewares: `ocrLimiter` + `uploadImage.single`) → `controller` (HTTP shape; parses `engine` field with `ExtractRequestSchema`, throws `HttpError`/delegates to `next(err)`) → `service` (picks adapter per `OcrEngine`, lazily constructs the chosen one; accepts override map for DI) → `adapter` (`GeminiOcrAdapter` or `PaddleOcrAdapter`) → `schema` (Zod contracts re-exported from `@ocr-web/shared`).
+`router` (per-route middlewares: `ocrLimiter` + `uploadImage.single`) → `controller` (HTTP shape; parses `engine` field with `ExtractRequestSchema`, throws `HttpError`/delegates to `next(err)`) → `service` (picks adapter per `OcrEngine`, lazily constructs the chosen one; accepts override map for DI) → `adapter` (`GeminiOcrAdapter` only; the `paddle` engine moved to the browser) → `schema` (Zod contracts re-exported from `@ocr-web/shared`).
 
-**Dual OCR engine.** Requests carry an `engine` form field (`'gemini'` default, or `'paddle'`). `OcrService` lazily constructs and memoizes whichever adapter the request asks for:
+**Server-side engine: only Gemini.** The `OcrEngineSchema` enum still includes `'paddle'` for backwards-compat with persisted client state, but the backend rejects `engine === 'paddle'` with HTTP 410 in `OcrService.getAdapter`. The local engine runs **entirely in the browser** via Tesseract.js (`frontend/src/lib/tesseractAdapter.ts`):
 - `GeminiOcrAdapter` — calls `@google/genai` with the pinned model, `temperature: 0`, `topP: 0.1`, `thinkingBudget: 1024`, 60s timeout (raced against SDK). Best quality (~99%) but rate-limited by the free tier (15 RPM / 1000 RPD per project).
-- `PaddleOcrAdapter` — fully local: `sharp` auto-orients, `highlightMask.ts` builds an HSV-band mask of highlighted regions, mask is upscaled 3× and written to a temp PNG, then `@gutenye/ocr-node` runs PP-OCRv4 latin detection + recognition via `onnxruntime-node`. Lines are sorted top-to-bottom (then left-to-right within ~12px Y window), filtered by `mean >= 0.55` confidence, then run through `spanishSplitWords` (the latin model's dict has no space token, so each line comes back as a concatenated blob — the wordninja-style segmenter restores word boundaries via DP over a 50k Spanish frequency table). Initial worker load (~3-5 s) is cached in a module-level promise. Quality ~85-95% on clean print, drops sharply on degraded scans / OCR typos (the splitter fragments unrecognized runs letter-by-letter, since it can't infer non-Spanish words).
+- `recognizeLocal` (browser) — Canvas-based HSV highlight mask (`highlightMaskCanvas.ts`) → 3× upscale → Tesseract.js worker (Spanish + English traineddata, PSM SINGLE_BLOCK, LSTM-only). Two-pass with 180° fallback driven by a Spanish trigram-density score (book photos with no EXIF orientation tag would otherwise come out as gibberish). Worker is module-level cached, auto-terminated after 5 min idle to free ~150 MB.
 
-**Highlight contract is shared.** Both adapters must respect `NO_HIGHLIGHT_SENTINEL` (`"No se detectó texto resaltado en esta imagen."`). The Paddle mask exists so the local engine matches the Gemini prompt's chromatic-filter semantics — if you change the prompt to look at non-highlighted text, you must also relax `highlightMask.ts` or the two engines will diverge silently.
+**Highlight contract is shared.** Both engines must respect `NO_HIGHLIGHT_SENTINEL` (`"No se detectó texto resaltado en esta imagen."`). The Canvas mask exists so the local engine matches the Gemini prompt's chromatic-filter semantics — if you change the prompt to look at non-highlighted text, you must also relax `highlightMaskCanvas.ts` or the two engines will diverge silently.
 
 Shared config in `backend/src/config/`:
-- `env.ts` — Zod-validated env. `GEMINI_API_KEY` is `.optional()` at boot. The server only throws if a request hits the Gemini adapter without a key. The Paddle engine works with no key — useful as a fallback when the Gemini quota is exhausted.
+- `env.ts` — Zod-validated env. `GEMINI_API_KEY` is `.optional()` at boot. The server only throws if a request hits the Gemini adapter without a key. The local engine never reaches the backend, so a missing key is fine if users always pick the local engine.
 - `prompt.ts` — `HIGHLIGHT_EXTRACTION_PROMPT` + `NO_HIGHLIGHT_SENTINEL`. Tune prompt here, never the model.
 - `logger.ts` — timestamped console wrapper; `info` gated by `NODE_ENV`. `withRequestId(id)` returns a scoped logger for per-request correlation.
 
@@ -115,7 +111,7 @@ The current prompt is a chromatic-filter instruction: extract only text that is 
 
 ## Deployment
 
-- **Backend** → Render.com web service. **Root directory must be empty (repo root), NOT `backend/`** — pnpm workspaces need to see `pnpm-workspace.yaml` at the root to resolve `@ocr-web/shared` (declared as `workspace:*`). Build `pnpm install && pnpm --filter backend models:download && pnpm --filter backend build` (the `models:download` step pulls the Paddle ONNX models into `backend/models/paddle/` so the offline engine works in production). Start `node backend/dist/index.js`. Env: `GEMINI_API_KEY` (optional but required if anyone selects the Gemini engine), `NODE_ENV=production`, `ALLOWED_ORIGINS=https://<your-vercel-url>`. Free tier sleeps after ~15 min idle.
+- **Backend** → Render.com web service. **Root directory must be empty (repo root), NOT `backend/`** — pnpm workspaces need to see `pnpm-workspace.yaml` at the root to resolve `@ocr-web/shared` (declared as `workspace:*`). Build `pnpm install && pnpm --filter backend build` — only `tsc` runs (no model download anymore; the Paddle ONNX engine was removed and replaced by browser-side Tesseract.js). Start `node backend/dist/index.js`. Env: `GEMINI_API_KEY` (optional but required if anyone selects the Gemini engine), `NODE_ENV=production`, `ALLOWED_ORIGINS=https://<your-vercel-url>`. Free tier sleeps after ~15 min idle — and now the worker process is small enough that it no longer hits the 512 MB OOM limit on cold start.
 - **Frontend** → Vercel. Root `frontend`, Vite preset (default install + build — Vercel runs `pnpm install` from repo root and resolves the workspace). Env: `VITE_API_URL` = Render URL, no trailing `/api`.
 - **CORS whitelist gotcha:** after deploying the frontend, update `ALLOWED_ORIGINS` on the backend with the Vercel URL or every request will be blocked.
 

@@ -3,6 +3,7 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import { ExtractResponseSchema } from '@ocr-web/shared';
 import { isRateLimitMessage, processOcr, type OcrEngine } from '../shared/api';
 import { downscaleImage } from '../lib/imageDownscale';
+import { recognizeLocal } from '../lib/tesseractAdapter';
 
 export type OcrStatus = 'idle' | 'processing' | 'success' | 'error';
 
@@ -101,21 +102,30 @@ async function extractOneWithRetries(
     if (signal.aborted) return;
 
     try {
-      const res = await processOcr(compressed, compressed.name, store.selectedEngine, signal);
-      const rawJson = await res.json().catch(() => null);
-      const parsed = rawJson ? ExtractResponseSchema.safeParse(rawJson) : null;
-      const body = parsed?.success ? parsed.data : null;
+      let text: string;
+      if (store.selectedEngine === 'paddle') {
+        // Local engine runs entirely in the browser via tesseract.js — no
+        // HTTP, no Render, no Gemini quota burn. Aborting mid-recognition is
+        // not natively supported by tesseract.js, but each image is short
+        // enough (<10 s on a typical laptop) that we just let the in-flight
+        // call settle and check the signal afterwards.
+        text = await recognizeLocal(compressed);
+        if (signal.aborted) return;
+      } else {
+        const res = await processOcr(compressed, compressed.name, store.selectedEngine, signal);
+        const rawJson = await res.json().catch(() => null);
+        const parsed = rawJson ? ExtractResponseSchema.safeParse(rawJson) : null;
+        const body = parsed?.success ? parsed.data : null;
 
-      if (!res.ok || body?.status === 'error') {
-        const errMsg = body?.warnings?.[0] ?? res.statusText ?? 'Error desconocido';
-        const rateLimit = res.status === 429 || res.status === 503 || isRateLimitMessage(errMsg);
-        if (rateLimit) throw new Error('RateLimit');
-        throw new Error(errMsg);
+        if (!res.ok || body?.status === 'error') {
+          const errMsg = body?.warnings?.[0] ?? res.statusText ?? 'Error desconocido';
+          const rateLimit = res.status === 429 || res.status === 503 || isRateLimitMessage(errMsg);
+          if (rateLimit) throw new Error('RateLimit');
+          throw new Error(errMsg);
+        }
+        if (!body) throw new Error('Respuesta inválida del servidor');
+        text = body.text;
       }
-
-      if (!body) throw new Error('Respuesta inválida del servidor');
-
-      const text = body.text;
       setState((s) => ({
         files: s.files.map((f) =>
           f.id === fileId
@@ -139,7 +149,10 @@ async function extractOneWithRetries(
 
       attempt++;
       const isRate = e.message === 'RateLimit';
-      const canRetry = attempt < MAX_ATTEMPTS;
+      // Local engine errors are deterministic (model load failure, OOM, image
+      // decode error). Retrying with backoff would just stall the queue on
+      // the same failure five times. Fail fast.
+      const canRetry = store.selectedEngine !== 'paddle' && attempt < MAX_ATTEMPTS;
 
       if (!canRetry) {
         setState((s) => ({
@@ -354,19 +367,26 @@ export const useOcrStore = create<OcrState>()(
           set({ globalProgress: Math.round((processedCount / toProcess.length) * 100) });
 
           if (i < toProcess.length - 1 && !signal.aborted) {
+            // 5 s inter-file pause exists to keep us under Gemini's 15 RPM
+            // free-tier ceiling. The local engine has no per-minute quota,
+            // so we only pay the cost of `prewarm` between images.
+            const interFileDelay =
+              get().selectedEngine === 'paddle' ? 0 : INTER_FILE_DELAY_MS;
             await Promise.all([
               prewarm,
-              new Promise<void>((resolve) => {
-                const t = setTimeout(resolve, INTER_FILE_DELAY_MS);
-                signal.addEventListener(
-                  'abort',
-                  () => {
-                    clearTimeout(t);
-                    resolve();
-                  },
-                  { once: true },
-                );
-              }),
+              interFileDelay === 0
+                ? Promise.resolve()
+                : new Promise<void>((resolve) => {
+                    const t = setTimeout(resolve, interFileDelay);
+                    signal.addEventListener(
+                      'abort',
+                      () => {
+                        clearTimeout(t);
+                        resolve();
+                      },
+                      { once: true },
+                    );
+                  }),
             ]);
           }
         }
@@ -452,19 +472,26 @@ export const useOcrStore = create<OcrState>()(
           set({ globalProgress: Math.round((processedCount / toProcess.length) * 100) });
 
           if (i < toProcess.length - 1 && !signal.aborted) {
+            // 5 s inter-file pause exists to keep us under Gemini's 15 RPM
+            // free-tier ceiling. The local engine has no per-minute quota,
+            // so we only pay the cost of `prewarm` between images.
+            const interFileDelay =
+              get().selectedEngine === 'paddle' ? 0 : INTER_FILE_DELAY_MS;
             await Promise.all([
               prewarm,
-              new Promise<void>((resolve) => {
-                const t = setTimeout(resolve, INTER_FILE_DELAY_MS);
-                signal.addEventListener(
-                  'abort',
-                  () => {
-                    clearTimeout(t);
-                    resolve();
-                  },
-                  { once: true },
-                );
-              }),
+              interFileDelay === 0
+                ? Promise.resolve()
+                : new Promise<void>((resolve) => {
+                    const t = setTimeout(resolve, interFileDelay);
+                    signal.addEventListener(
+                      'abort',
+                      () => {
+                        clearTimeout(t);
+                        resolve();
+                      },
+                      { once: true },
+                    );
+                  }),
             ]);
           }
         }
