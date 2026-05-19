@@ -7,8 +7,24 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { HeroHeader } from './components/HeroHeader';
 import { CompactHeader } from './components/CompactHeader';
 
+async function importWithRetry<T>(
+  loader: () => Promise<T>,
+  retries = 2,
+  delayMs = 600,
+): Promise<T> {
+  try {
+    return await loader();
+  } catch (err) {
+    if (retries <= 0) throw err;
+    await new Promise((r) => setTimeout(r, delayMs));
+    return importWithRetry(loader, retries - 1, delayMs * 2);
+  }
+}
+
 const OcrWorkspace = lazy(() =>
-  import('./features/ocr/components/OcrWorkspace').then((m) => ({ default: m.OcrWorkspace })),
+  importWithRetry(() => import('./features/ocr/components/OcrWorkspace')).then((m) => ({
+    default: m.OcrWorkspace,
+  })),
 );
 
 function WorkspaceFallback() {
