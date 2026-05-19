@@ -6,7 +6,10 @@ import type { OcrEngine } from '@ocr-web/shared';
 import { HttpError } from '../../middlewares/errorHandler';
 
 const MODEL_ID = 'gemini-2.5-flash-lite';
-const GEMINI_TIMEOUT_MS = 60_000;
+// 90s (antes 60s): muestras reales en samples del usuario tardan hasta 50s
+// para páginas densas con muchas regiones resaltadas. 60s dejaba poca cabeza
+// y disparaba timeouts antes de que la API terminara legitimamente.
+const GEMINI_TIMEOUT_MS = 90_000;
 
 export interface OcrAdapter {
   extractText(imageBuffer: Buffer, mimeType: string): Promise<string>;

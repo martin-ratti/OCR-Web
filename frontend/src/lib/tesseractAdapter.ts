@@ -206,6 +206,47 @@ function rotateImageData180(src: ImageData): ImageData {
 }
 
 /**
+ * Rotate ImageData 90° clockwise (width <-> height swap). WhatsApp strips
+ * EXIF orientation, so book photos taken portrait often arrive landscape and
+ * Tesseract sees columns of vertical text → gibberish without this fallback.
+ */
+function rotateImageData90CW(src: ImageData): ImageData {
+  const { width: w, height: h, data } = src;
+  const out = new ImageData(h, w);
+  const dst = out.data;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const si = (y * w + x) * 4;
+      // (x, y) -> (h - 1 - y, x) in rotated coords; rotated width = h.
+      const di = (x * h + (h - 1 - y)) * 4;
+      dst[di] = data[si];
+      dst[di + 1] = data[si + 1];
+      dst[di + 2] = data[si + 2];
+      dst[di + 3] = data[si + 3];
+    }
+  }
+  return out;
+}
+
+function rotateImageData270CW(src: ImageData): ImageData {
+  const { width: w, height: h, data } = src;
+  const out = new ImageData(h, w);
+  const dst = out.data;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const si = (y * w + x) * 4;
+      // (x, y) -> (y, w - 1 - x); rotated width = h.
+      const di = ((w - 1 - x) * h + y) * 4;
+      dst[di] = data[si];
+      dst[di + 1] = data[si + 1];
+      dst[di + 2] = data[si + 2];
+      dst[di + 3] = data[si + 3];
+    }
+  }
+  return out;
+}
+
+/**
  * Run the local OCR pipeline on a single File.
  *
  * 1. Build the highlight mask in Canvas (HSV banding + shape filter + Otsu
@@ -215,13 +256,40 @@ function rotateImageData180(src: ImageData): ImageData {
  * 3. Hand the masked PNG to Tesseract upscaled `UPSCALE_FACTOR×` for better
  *    glyph resolution.
  * 4. If the first pass produces mostly garbage (Spanish-likeness < threshold),
- *    rotate the masked image 180° and retry — book photos often lack EXIF
- *    orientation tags, so an upside-down shot would otherwise yield gibberish.
+ *    try the other 3 cardinal rotations (180°, 90° CW, 270° CW) — WhatsApp
+ *    strips EXIF orientation so portrait book photos commonly arrive sideways
+ *    or upside-down. Keep whichever pass scores highest on Spanish trigrams.
  * 5. Strip per-line OCR garbage and join.
  */
-// Spanish trigram density on real text typically ~0.05-0.10; upside-down
-// OCR garbage scores ~0.005-0.02. Threshold splits the two cleanly.
+// Spanish trigram density on real text typically ~0.05-0.10; rotated/garbage
+// OCR scores ~0.005-0.02. 0.035 splits clean text from garbage and is the
+// "good enough, no need to try more rotations" early-exit threshold.
 const MIN_SPANISHNESS = 0.030;
+const GOOD_ENOUGH_SPANISHNESS = 0.035;
+
+type RotationFn = (src: ImageData) => ImageData;
+const ROTATIONS: ReadonlyArray<{ label: string; fn: RotationFn | null }> = [
+  { label: '0', fn: null },
+  { label: '180', fn: rotateImageData180 },
+  { label: '90', fn: rotateImageData90CW },
+  { label: '270', fn: rotateImageData270CW },
+];
+
+async function recognizeRotation(
+  worker: Worker,
+  base: ImageData,
+  rot: RotationFn | null,
+): Promise<{ text: string; score: ReturnType<typeof scoreSpanishness> }> {
+  const data = rot ? rot(base) : base;
+  const blob = await maskedImageDataToBlob(data, UPSCALE_FACTOR);
+  const url = URL.createObjectURL(blob);
+  try {
+    const { data: ocr } = await worker.recognize(url);
+    return { text: ocr.text, score: scoreSpanishness(ocr.text) };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
 
 export async function recognizeLocal(file: File): Promise<string> {
   const masked = await buildMaskedImageData(file);
@@ -231,40 +299,32 @@ export async function recognizeLocal(file: File): Promise<string> {
   const worker = await getWorker();
   lastUsedAt = Date.now();
 
-  const firstBlob = await maskedImageDataToBlob(masked.imageData, UPSCALE_FACTOR);
-  const firstUrl = URL.createObjectURL(firstBlob);
-  let primary: string;
-  let primaryScore: { score: number; matches: number; total: number };
-  try {
-    const { data } = await worker.recognize(firstUrl);
-    primary = data.text;
-    primaryScore = scoreSpanishness(primary);
-  } finally {
-    URL.revokeObjectURL(firstUrl);
-  }
+  let bestText = '';
+  let bestScore = { score: -1, matches: 0, total: 0 };
 
-  // If the page might be upside-down, run a second pass on the rotated mask
-  // and keep whichever recognized text scored higher.
-  if (primaryScore.score < MIN_SPANISHNESS && primaryScore.total >= 30) {
-    const rotated = rotateImageData180(masked.imageData);
-    const rotBlob = await maskedImageDataToBlob(rotated, UPSCALE_FACTOR);
-    const rotUrl = URL.createObjectURL(rotBlob);
-    try {
-      const { data: rotData } = await worker.recognize(rotUrl);
-      const rotScore = scoreSpanishness(rotData.text);
-      if (rotScore.score > primaryScore.score) {
-        primary = rotData.text;
-        primaryScore = rotScore;
-      }
-    } finally {
-      URL.revokeObjectURL(rotUrl);
+  for (const { fn } of ROTATIONS) {
+    const r = await recognizeRotation(worker, masked.imageData, fn);
+    if (r.score.score > bestScore.score) {
+      bestScore = r.score;
+      bestText = r.text;
     }
+    // Early exit: first pass scored well, no need to try other orientations.
+    if (bestScore.score >= GOOD_ENOUGH_SPANISHNESS) break;
+    // Also skip remaining rotations if the text is so short that scoring is
+    // unreliable (avoids 4× recognise on near-empty masks).
+    if (bestScore.total < 30) break;
   }
 
   lastUsedAt = Date.now();
   scheduleIdleTermination();
 
-  const cleaned = primary
+  // If even the best rotation is gibberish, return sentinel rather than dump
+  // unreadable text on the user. MIN_SPANISHNESS is the floor for "real text".
+  if (bestScore.score < MIN_SPANISHNESS && bestScore.total >= 30) {
+    return NO_HIGHLIGHT_SENTINEL;
+  }
+
+  const cleaned = bestText
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l.length > 0)

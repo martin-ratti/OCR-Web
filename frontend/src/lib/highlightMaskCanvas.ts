@@ -15,22 +15,30 @@ interface HighlightBand {
 }
 
 const HIGHLIGHT_BANDS: HighlightBand[] = [
-  { hueMin: 30, hueMax: 75, satMin: 0.22 },
-  { hueMin: 75, hueMax: 175, satMin: 0.22, satMax: 0.62 },
-  { hueMin: 175, hueMax: 215, satMin: 0.18, satMax: 0.60 },
-  // Pink/magenta highlighter on white prints as low-sat (~0.08-0.18) hues
-  // around 300-345°. Drop satMin to catch pastel rosa fluo without leaking
-  // skin/wood (those sit in 10-25° red-orange).
-  { hueMin: 270, hueMax: 355, satMin: 0.08 },
-  { hueMin: 0, hueMax: 18, satMin: 0.18 },
+  { hueMin: 30, hueMax: 75, satMin: 0.20 },
+  { hueMin: 75, hueMax: 175, satMin: 0.20, satMax: 0.65 },
+  { hueMin: 175, hueMax: 215, satMin: 0.16, satMax: 0.62 },
+  // Pink/magenta highlighter on white prints as low-sat (~0.05-0.18) hues
+  // around 300-345°. satMin 0.05 captura rosa pastel muy claro de marcadores
+  // tipo "milky pink" sin meter piel/madera (esos quedan 10-25° red-orange).
+  // Validado con muestras reales que antes caían en sentinel.
+  { hueMin: 270, hueMax: 355, satMin: 0.05 },
+  { hueMin: 0, hueMax: 18, satMin: 0.16 },
 ];
 
 const MIN_VALUE = 0.40;
 const MAX_DARKNESS_FOR_HIGHLIGHT_BG = 0.20;
-const DILATE_RADIUS_H = 55;
+// Dilation horizontal 70px (antes 55): cubre gaps que el marcador deja entre
+// palabras en libros A5/A4 escaneados a 1600px ancho. Captura trailing letters
+// que el stroke salta sin meter texto no resaltado adyacente.
+const DILATE_RADIUS_H = 70;
 const DILATE_RADIUS_UP = 34;
 const DILATE_RADIUS_DOWN = 14;
-const MIN_HIGHLIGHT_COVERAGE = 0.0012;
+// 0.0006 (antes 0.0012): muestras reales con marcador rosa pastel en bordes
+// solamente caían bajo el umbral viejo y devolvían sentinel sin intentar OCR.
+// Falso-positivo aceptable: si Tesseract no encuentra texto legible, igual
+// filtrado por isReadableLine retorna sentinel limpio al final.
+const MIN_HIGHLIGHT_COVERAGE = 0.0006;
 const OTSU_FLOOR = 95;
 const OTSU_CEIL = 175;
 // After dilation, fill horizontal gaps within each row between the first and
