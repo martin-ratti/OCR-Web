@@ -18,6 +18,15 @@ export function isRateLimitMessage(msg: string | undefined): boolean {
   return /RESOURCE_EXHAUSTED|quota|exhausted|rate limit|429/i.test(msg);
 }
 
+// Saturación temporal del modelo upstream (Gemini 503 UNAVAILABLE). Distinto de
+// cuota agotada: reintentar tiene sentido en segundos, no requiere esperar al
+// reset diario. Backend ya devuelve 503 para estos casos; este matcher cubre
+// el caso defensivo donde el mensaje llegue sin status code claro.
+export function isUpstreamBusyMessage(msg: string | undefined): boolean {
+  if (!msg) return false;
+  return /UNAVAILABLE|high demand|overloaded|saturado|try again later|503/i.test(msg);
+}
+
 export async function processOcr(
   blob: Blob,
   filename: string,

@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { ExtractResponseSchema } from '@ocr-web/shared';
-import { isRateLimitMessage, processOcr, type OcrEngine } from '../shared/api';
+import { isRateLimitMessage, isUpstreamBusyMessage, processOcr, type OcrEngine } from '../shared/api';
 import { downscaleImage } from '../lib/imageDownscale';
 import { recognizeLocal } from '../lib/tesseractAdapter';
 
@@ -119,8 +119,16 @@ async function extractOneWithRetries(
 
         if (!res.ok || body?.status === 'error') {
           const errMsg = body?.warnings?.[0] ?? res.statusText ?? 'Error desconocido';
-          const rateLimit = res.status === 429 || res.status === 503 || isRateLimitMessage(errMsg);
-          if (rateLimit) throw new Error('RateLimit');
+          // 429 = quota agotada (backoff largo, mensaje "agotada"). 503/502/504 =
+          // saturación temporal del modelo (backoff corto, mensaje "saturado").
+          // Antes el 503 caía a "Unhandled" en el server (500) y el cliente no
+          // reintentaba; ahora el server devuelve 503 y entra acá.
+          if (res.status === 429 || isRateLimitMessage(errMsg)) {
+            throw new Error('RateLimit');
+          }
+          if (res.status === 503 || res.status === 502 || res.status === 504 || isUpstreamBusyMessage(errMsg)) {
+            throw new Error('UpstreamBusy');
+          }
           throw new Error(errMsg);
         }
         if (!body) throw new Error('Respuesta inválida del servidor');
@@ -149,6 +157,7 @@ async function extractOneWithRetries(
 
       attempt++;
       const isRate = e.message === 'RateLimit';
+      const isBusy = e.message === 'UpstreamBusy';
       // Local engine errors are deterministic (model load failure, OOM, image
       // decode error). Retrying with backoff would just stall the queue on
       // the same failure five times. Fail fast.
@@ -163,7 +172,9 @@ async function extractOneWithRetries(
                   status: 'error',
                   errorMessage: isRate
                     ? 'Límite de la IA alcanzado. La cuota gratuita se agotó. Probá más tarde.'
-                    : e.message || 'Error desconocido',
+                    : isBusy
+                      ? 'El modelo de IA está saturado. Probá de nuevo en unos minutos o usá el motor local.'
+                      : e.message || 'Error desconocido',
                   infoMessage: undefined,
                 }
               : f,
@@ -172,7 +183,8 @@ async function extractOneWithRetries(
         return;
       }
 
-      const waitSec = isRate ? attempt * 15 : attempt * 3;
+      // Backoff diferenciado: cuota (15·n s) > saturación upstream (8·n s) > genérico (3·n s).
+      const waitSec = isRate ? attempt * 15 : isBusy ? attempt * 8 : attempt * 3;
       setState((s) => ({
         files: s.files.map((f) =>
           f.id === fileId
@@ -180,7 +192,9 @@ async function extractOneWithRetries(
                 ...f,
                 infoMessage: isRate
                   ? `La IA está a mil. Esperando ${waitSec}s (intento ${attempt}/${MAX_ATTEMPTS - 1})...`
-                  : `Reintentando en ${waitSec}s (intento ${attempt}/${MAX_ATTEMPTS - 1})...`,
+                  : isBusy
+                    ? `Modelo saturado, reintentando en ${waitSec}s (intento ${attempt}/${MAX_ATTEMPTS - 1})...`
+                    : `Reintentando en ${waitSec}s (intento ${attempt}/${MAX_ATTEMPTS - 1})...`,
               }
             : f,
         ),

@@ -17,8 +17,24 @@ function isRateLimitError(err: unknown): boolean {
   );
 }
 
+// Gemini frecuentemente devuelve 503 UNAVAILABLE ("This model is currently
+// experiencing high demand") en horarios pico. Sin esta detección, el error
+// caía a "Unhandled" → 500 → cliente NO reintenta. Tratamos esto como
+// transitorio y devolvemos 503 para que el cliente entre al loop de backoff.
+function isTransientUpstreamError(err: unknown): boolean {
+  const anyErr = err as { status?: number; message?: string };
+  const msg = anyErr?.message ?? '';
+  return (
+    anyErr?.status === 503 ||
+    anyErr?.status === 502 ||
+    anyErr?.status === 504 ||
+    /503|UNAVAILABLE|high demand|overloaded|try again later|temporarily/i.test(msg)
+  );
+}
+
 const SAFE_PUBLIC_MESSAGES = {
   rateLimit: 'Límite de uso alcanzado. Probá nuevamente en unos minutos.',
+  upstreamBusy: 'El modelo de IA está saturado. Reintentando automáticamente...',
   upstream: 'No pudimos procesar la imagen. Probá de nuevo.',
   badRequest: 'Solicitud inválida.',
   payloadTooLarge: 'La imagen supera el tamaño máximo permitido (5 MB).',
@@ -64,6 +80,17 @@ export function errorHandler(
       status: 'error',
       text: '',
       warnings: [SAFE_PUBLIC_MESSAGES.rateLimit],
+    });
+    return;
+  }
+
+  if (isTransientUpstreamError(err)) {
+    const internal = (err as Error).message || 'upstream unavailable';
+    logger.warn(`${idTag}[UpstreamBusy] ${internal}`);
+    res.status(503).json({
+      status: 'error',
+      text: '',
+      warnings: [SAFE_PUBLIC_MESSAGES.upstreamBusy],
     });
     return;
   }
