@@ -240,7 +240,7 @@ export function OcrWorkspace() {
 
   return (
     <div
-      className="relative w-full min-h-[calc(100vh-6rem)] mx-auto"
+      className="relative w-full h-[calc(100vh-6rem)] mx-auto"
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}

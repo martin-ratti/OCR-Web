@@ -59,7 +59,7 @@ export function OriginalViewer({ activeFile }: OriginalViewerProps) {
 
   return (
     <section
-      className="flex-1 min-w-0 md:border-r-2 border-pink-100 bg-zinc-50 relative flex flex-col min-h-[220px] overflow-hidden"
+      className="flex-1 min-w-0 md:border-r-2 border-pink-100 bg-zinc-50 relative flex flex-col min-h-0 overflow-hidden"
       aria-label="Vista previa de la imagen"
     >
       <Badge className="absolute top-2 left-3 z-10 bg-white text-pink-500 border-2 border-pink-100 shadow-sm rounded-full px-2.5 py-0.5 text-[11px] gap-1 hover:bg-white">

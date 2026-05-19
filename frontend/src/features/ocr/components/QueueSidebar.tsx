@@ -32,7 +32,7 @@ interface QueueSidebarProps {
 }
 
 const ROW_HEIGHT = 64;
-const VIRTUALIZE_THRESHOLD = 50;
+const VIRTUALIZE_THRESHOLD = 20;
 
 interface RowProps {
   filteredFiles: OcrFile[];
