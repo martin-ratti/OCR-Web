@@ -1,35 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ocrSelectors, useOcrStore } from '../../../store/useOcrStore';
-import { exportDocx, exportSingleTxt, exportZipTxt } from '../../../lib/exporters';
+import { exportDocx, exportSingleTxt } from '../../../lib/exporters';
 import { KawaiiModal } from './KawaiiModal';
 import { OriginalViewer } from './OriginalViewer';
 import { ExtractedEditor, type ExtractedEditorHandle } from './ExtractedEditor';
-import { ExportToolbar } from './ExportToolbar';
-import { QueueSidebar, type QueueFilter } from './QueueSidebar';
-import {
-  HeartPulse,
-  Sparkles,
-  Cpu,
-  Package,
-  ScanLine,
-  Trash2,
-  XCircle,
-  Plus,
-  ClipboardList,
-  FileText as FileTextIcon,
-  UploadCloud,
-} from 'lucide-react';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+import { QueueSidebar } from './QueueSidebar';
+import { WorkspaceToolbar } from './WorkspaceToolbar';
+import { Cpu, ScanLine, UploadCloud } from 'lucide-react';
 import { Progress } from '@/components/ui/progress';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { Badge } from '@/components/ui/badge';
 
 import pandaImg from '../../../assets/panda.png';
 import monkeyImg from '../../../assets/monkey.png';
@@ -58,64 +37,20 @@ export function OcrWorkspace() {
   const restoreCleared = useOcrStore((s) => s.restoreCleared);
   const cancel = useOcrStore((s) => s.cancel);
   const removeFile = useOcrStore((s) => s.removeFile);
-  const removeFiles = useOcrStore((s) => s.removeFiles);
   const retryAllErrors = useOcrStore((s) => s.retryAllErrors);
-  const processSelected = useOcrStore((s) => s.processSelected);
   const reorderFile = useOcrStore((s) => s.reorderFile);
   const setSelectedEngine = useOcrStore((s) => s.setSelectedEngine);
   const setFontSize = useOcrStore((s) => s.setFontSize);
   const addFiles = useOcrStore((s) => s.addFiles);
 
   const [showConfirmClear, setShowConfirmClear] = useState(false);
-  const [filter, setFilter] = useState<QueueFilter>('all');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [tessProgress, setTessProgress] = useState<TesseractProgress | null>(null);
 
   useEffect(() => subscribeTesseractProgress(setTessProgress), []);
   const editorRef = useRef<ExtractedEditorHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const validSelectedIds = useMemo(() => {
-    const fileIds = new Set(files.map((f) => f.id));
-    const next = new Set<string>();
-    selectedIds.forEach((id) => {
-      if (fileIds.has(id)) next.add(id);
-    });
-    return next;
-  }, [files, selectedIds]);
-
-  const toggleSelect = (id: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-  const selectAllVisible = (ids: string[], allSelected: boolean) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (allSelected) ids.forEach((id) => next.delete(id));
-      else ids.forEach((id) => next.add(id));
-      return next;
-    });
-  };
-  const clearSelection = () => setSelectedIds(new Set());
-  const handleBulkDelete = () => {
-    const ids = Array.from(validSelectedIds);
-    if (ids.length === 0) return;
-    removeFiles(ids);
-    setSelectedIds(new Set());
-    toast.success(`Eliminados ${ids.length}`);
-  };
-  const handleBulkRetry = async () => {
-    const ids = Array.from(validSelectedIds);
-    if (ids.length === 0) return;
-    toast.info(`Reescaneando ${ids.length} archivo(s)...`);
-    await processSelected(ids);
-  };
 
   const activeFile = useMemo(
     () => files.find((f) => f.id === activeFileId),
@@ -169,16 +104,6 @@ export function OcrWorkspace() {
     files
       .filter((f) => f.status === 'success' && f.resultText)
       .map((f) => ({ filename: f.file.name, text: f.resultText! }));
-
-  const handleExportZip = async () => {
-    const items = collectDoneItems();
-    if (items.length === 0) {
-      toast.warning('No hay textos extraídos todavía');
-      return;
-    }
-    await exportZipTxt(items);
-    toast.success(`${items.length} apunte(s) en ZIP`);
-  };
 
   const handleExportDocx = async () => {
     const items = collectDoneItems();
@@ -315,31 +240,31 @@ export function OcrWorkspace() {
 
   return (
     <div
-      className="relative w-full min-h-[calc(100vh-12rem)] mx-auto"
+      className="relative w-full min-h-[calc(100vh-6rem)] mx-auto"
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
       <div
-        className="absolute z-0 pointer-events-none motion-safe:animate-[bounce_5s_infinite] hidden xl:block"
+        className="absolute z-0 pointer-events-none motion-safe:animate-[bounce_5s_infinite] hidden lg:block"
         style={{ left: 'clamp(-200px, -8vw, -40px)', top: '15%' }}
         aria-hidden
       >
         <img
           src={pandaImg}
           alt=""
-          className="w-60 h-auto drop-shadow-xl rotate-[-15deg]"
+          className="w-44 h-auto drop-shadow-xl rotate-[-15deg]"
         />
       </div>
       <div
-        className="absolute z-0 pointer-events-none motion-safe:animate-[bounce_6s_infinite] hidden xl:block"
+        className="absolute z-0 pointer-events-none motion-safe:animate-[bounce_6s_infinite] hidden lg:block"
         style={{ right: 'clamp(-200px, -8vw, -40px)', top: '40%' }}
         aria-hidden
       >
         <img
           src={monkeyImg}
           alt=""
-          className="w-60 h-auto drop-shadow-xl rotate-[15deg] scale-x-[-1]"
+          className="w-44 h-auto drop-shadow-xl rotate-[15deg] scale-x-[-1]"
         />
       </div>
 
@@ -367,166 +292,29 @@ export function OcrWorkspace() {
       />
 
       <div className="flex flex-col h-full w-full paper-card overflow-visible relative z-10 group">
-        <div className="flex flex-wrap gap-x-6 gap-y-3 justify-between items-center bg-pink-50 px-5 py-4 border-b-2 border-pink-100 rounded-t-3xl relative z-10">
-          <div className="flex items-center gap-x-5 gap-y-3 flex-wrap">
-            <div className="flex items-center gap-3 flex-wrap">
-              <Select
-                value={selectedEngine}
-                onValueChange={(v) => setSelectedEngine(v as 'gemini' | 'paddle' | 'groq')}
-                disabled={working}
-              >
-                <SelectTrigger
-                  aria-label="Motor de OCR"
-                  className="h-11 min-w-[244px] rounded-full border-2 border-pink-200 bg-white px-4 text-sm font-extrabold text-pink-600 shadow-sm hover:border-pink-300 focus:ring-2 focus:ring-pink-300 focus:ring-offset-1"
-                >
-                  <SelectValue placeholder="Elegí el motor" />
-                </SelectTrigger>
-                <SelectContent className="rounded-2xl border-2 border-pink-100">
-                  <SelectItem value="gemini" className="font-bold">
-                    <span className="flex items-center gap-2">
-                      <Sparkles className="w-4 h-4 text-pink-500" aria-hidden />
-                      IA (Gemini) — Alta precisión
-                    </span>
-                  </SelectItem>
-                  <SelectItem value="groq" className="font-bold">
-                    <span className="flex items-center gap-2">
-                      <Sparkles className="w-4 h-4 text-amber-500" aria-hidden />
-                      IA (Groq Llama) — Mil/día
-                    </span>
-                  </SelectItem>
-                  <SelectItem value="paddle" className="font-bold">
-                    <span className="flex items-center gap-2">
-                      <Cpu className="w-4 h-4 text-indigo-500" aria-hidden />
-                      Local (en tu navegador) — Sin cuota
-                    </span>
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-
-              {working ? (
-                <button
-                  onClick={cancel}
-                  className="btn-bounce inline-flex items-center gap-2 bg-rose-400 text-white h-11 px-5 rounded-full font-extrabold hover:bg-rose-500 shadow-md shadow-rose-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 focus-visible:ring-offset-2"
-                >
-                  <XCircle className="w-5 h-5" aria-hidden />
-                  Cancelar (Esc)
-                </button>
-              ) : (
-                <button
-                  onClick={processAll}
-                  disabled={counts.pending + counts.error === 0}
-                  className="btn-bounce inline-flex items-center gap-2 bg-pink-400 text-white h-11 px-5 rounded-full font-extrabold hover:bg-pink-500 shadow-md shadow-pink-200 disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-300 focus-visible:ring-offset-2"
-                >
-                  <HeartPulse className="w-5 h-5 motion-safe:animate-pulse" aria-hidden />
-                  ¡DALAAAA! <Sparkles className="w-4 h-4" aria-hidden />
-                </button>
-              )}
-            </div>
-
-            <div className="h-8 w-px bg-pink-200 hidden md:block" aria-hidden />
-
-            <div className="flex items-center gap-2 flex-wrap">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={handleAddMoreClick}
-                    disabled={working}
-                    aria-label="Agregar más imágenes"
-                    className="btn-bounce inline-flex items-center gap-1.5 bg-white text-pink-500 h-10 px-4 rounded-full font-bold hover:bg-pink-50 border-2 border-pink-200 transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-300"
-                  >
-                    <Plus className="w-4 h-4" aria-hidden />
-                    Más imágenes
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>Agregar imágenes (o arrastrá acá)</TooltipContent>
-              </Tooltip>
-
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={() => setShowConfirmClear(true)}
-                    disabled={working}
-                    aria-label="Vaciar todo"
-                    className="btn-bounce inline-flex items-center gap-1.5 bg-white text-rose-500 h-10 px-4 rounded-full font-bold hover:bg-rose-50 border-2 border-rose-100 transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200"
-                  >
-                    <Trash2 className="w-4 h-4" aria-hidden />
-                    Sacá todo
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>Limpiar toda la cola (con deshacer)</TooltipContent>
-              </Tooltip>
-            </div>
-
-            <div className="h-8 w-px bg-pink-200 hidden md:block" aria-hidden />
-
-            <div className="flex items-center gap-2 flex-wrap">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={handleCopyAll}
-                    disabled={counts.success === 0}
-                    aria-label="Copiar todo concatenado"
-                    className="btn-bounce inline-flex items-center gap-1.5 bg-white text-pink-500 h-10 px-4 rounded-full font-bold hover:bg-pink-50 border-2 border-pink-200 transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-300"
-                  >
-                    <ClipboardList className="w-4 h-4" aria-hidden />
-                    Copiar todo
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>Copiar todos los textos juntos</TooltipContent>
-              </Tooltip>
-
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={handleExportZip}
-                    disabled={counts.success === 0}
-                    aria-label={`Exportar ${counts.success} archivos como ZIP`}
-                    className="btn-bounce inline-flex items-center gap-1.5 bg-white text-indigo-600 h-10 px-4 rounded-full font-bold hover:bg-indigo-50 border-2 border-indigo-100 transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-200"
-                  >
-                    <Package className="w-4 h-4" aria-hidden />
-                    ZIP
-                    <Badge
-                      variant="secondary"
-                      className="ml-0.5 bg-indigo-100 text-indigo-700 border-0 font-extrabold"
-                    >
-                      {counts.success}
-                    </Badge>
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>Descargar TXT en ZIP</TooltipContent>
-              </Tooltip>
-
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={handleExportDocx}
-                    disabled={counts.success === 0}
-                    aria-label={`Exportar ${counts.success} archivos a Word`}
-                    className="btn-bounce inline-flex items-center gap-1.5 bg-white text-blue-700 h-10 px-4 rounded-full font-bold hover:bg-blue-50 border-2 border-blue-100 transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-200"
-                  >
-                    <FileTextIcon className="w-4 h-4" aria-hidden />
-                    Word
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>Exportar como .docx</TooltipContent>
-              </Tooltip>
-            </div>
-          </div>
-
-          <ExportToolbar
-            canAct={canEditorAct}
-            fontSize={fontSize}
-            minFontSize={MIN_FONT}
-            maxFontSize={MAX_FONT}
-            onCleanFormat={handleCleanFormat}
-            onSave={handleSave}
-            onFontSizeChange={setFontSize}
-          />
-        </div>
+        <WorkspaceToolbar
+          selectedEngine={selectedEngine}
+          onSelectEngine={setSelectedEngine}
+          working={working}
+          pendingPlusErrorCount={counts.pending + counts.error}
+          successCount={counts.success}
+          canEditorAct={canEditorAct}
+          fontSize={fontSize}
+          minFontSize={MIN_FONT}
+          maxFontSize={MAX_FONT}
+          onProcessAll={processAll}
+          onCancel={cancel}
+          onAddMore={handleAddMoreClick}
+          onClear={() => setShowConfirmClear(true)}
+          onCopyAll={handleCopyAll}
+          onExportDocx={handleExportDocx}
+          onCleanFormat={handleCleanFormat}
+          onFontSizeChange={setFontSize}
+        />
 
         {working && (
           <div
-            className="bg-pink-50 border-b-2 border-pink-100 px-4 py-3"
+            className="bg-pink-50 border-b-2 border-pink-100 px-4 py-1.5"
             role="status"
             aria-live="polite"
           >
@@ -548,7 +336,7 @@ export function OcrWorkspace() {
 
         {selectedEngine === 'paddle' && tessProgress && tessProgress.status === 'loading' && (
           <div
-            className="bg-indigo-50 border-b-2 border-indigo-100 px-4 py-3"
+            className="bg-indigo-50 border-b-2 border-indigo-100 px-4 py-1.5"
             role="status"
             aria-live="polite"
           >
@@ -574,20 +362,12 @@ export function OcrWorkspace() {
             working={working}
             successCount={counts.success}
             errorCount={counts.error}
-            filter={filter}
-            onFilterChange={setFilter}
             onSelect={setActiveFile}
             onRetry={processOne}
             onRemove={removeFile}
             onRetryAllErrors={retryAllErrors}
             collapsed={sidebarCollapsed}
             onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
-            selectedIds={validSelectedIds}
-            onToggleSelect={toggleSelect}
-            onSelectAllVisible={selectAllVisible}
-            onClearSelection={clearSelection}
-            onBulkDelete={handleBulkDelete}
-            onBulkRetry={handleBulkRetry}
             onReorder={reorderFile}
           />
 

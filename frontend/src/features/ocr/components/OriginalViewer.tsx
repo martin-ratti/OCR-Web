@@ -1,5 +1,5 @@
-import { useCallback, useRef, useState } from 'react';
-import { Camera, ImageIcon, Maximize2, Minus, Plus, RotateCcw } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { Camera, ImageIcon, Minus, Plus, RotateCcw } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { OcrFile } from '../../../store/useOcrStore';
@@ -38,15 +38,6 @@ export function OriginalViewer({ activeFile }: OriginalViewerProps) {
     setScale((s) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, s + delta)));
   };
 
-  const onWheel = useCallback(
-    (e: React.WheelEvent) => {
-      if (!e.ctrlKey && !e.metaKey) return;
-      e.preventDefault();
-      zoomBy(e.deltaY < 0 ? SCALE_STEP : -SCALE_STEP);
-    },
-    [],
-  );
-
   const onPointerDown = (e: React.PointerEvent) => {
     if (scale <= 1) return;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -68,10 +59,10 @@ export function OriginalViewer({ activeFile }: OriginalViewerProps) {
 
   return (
     <section
-      className="flex-1 min-w-0 md:border-r-2 border-pink-100 bg-zinc-50 relative flex flex-col min-h-[280px] overflow-hidden"
+      className="flex-1 min-w-0 md:border-r-2 border-pink-100 bg-zinc-50 relative flex flex-col min-h-[220px] overflow-hidden"
       aria-label="Vista previa de la imagen"
     >
-      <Badge className="absolute top-4 left-4 z-10 bg-white text-pink-500 border-2 border-pink-100 shadow-sm rounded-full px-3 py-1 gap-1 hover:bg-white">
+      <Badge className="absolute top-2 left-3 z-10 bg-white text-pink-500 border-2 border-pink-100 shadow-sm rounded-full px-2.5 py-0.5 text-[11px] gap-1 hover:bg-white">
         <Camera className="w-3 h-3" aria-hidden /> Evidencia A
       </Badge>
 
@@ -92,7 +83,7 @@ export function OriginalViewer({ activeFile }: OriginalViewerProps) {
                 <Minus className="w-4 h-4" aria-hidden />
               </button>
             </TooltipTrigger>
-            <TooltipContent>Alejar (Ctrl + scroll)</TooltipContent>
+            <TooltipContent>Alejar</TooltipContent>
           </Tooltip>
           <span className="px-1 text-[11px] font-extrabold text-zinc-700 tabular-nums select-none">
             {Math.round(scale * 100)}%
@@ -108,7 +99,7 @@ export function OriginalViewer({ activeFile }: OriginalViewerProps) {
                 <Plus className="w-4 h-4" aria-hidden />
               </button>
             </TooltipTrigger>
-            <TooltipContent>Acercar (Ctrl + scroll)</TooltipContent>
+            <TooltipContent>Acercar</TooltipContent>
           </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -126,8 +117,7 @@ export function OriginalViewer({ activeFile }: OriginalViewerProps) {
       )}
 
       <div
-        className="flex-1 min-h-0 overflow-hidden p-5 flex items-center justify-center select-none"
-        onWheel={onWheel}
+        className="flex-1 min-h-0 overflow-hidden p-3 flex items-center justify-center select-none"
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -156,11 +146,6 @@ export function OriginalViewer({ activeFile }: OriginalViewerProps) {
         )}
       </div>
 
-      {activeFile && scale === 1 && (
-        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 text-[10px] font-bold text-zinc-500 bg-white/80 border border-pink-100 rounded-full px-2 py-0.5 flex items-center gap-1 pointer-events-none">
-          <Maximize2 className="w-3 h-3" aria-hidden /> Ctrl + scroll para hacer zoom
-        </div>
-      )}
     </section>
   );
 }
