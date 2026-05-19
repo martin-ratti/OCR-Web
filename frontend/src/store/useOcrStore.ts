@@ -7,6 +7,16 @@ import { recognizeLocal } from '../lib/tesseractAdapter';
 
 export type OcrStatus = 'idle' | 'processing' | 'success' | 'error';
 
+// Backend multer cap: 5 MB. Keep in sync with backend/src/middlewares/upload.ts.
+export const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
+
+export interface AddFilesResult {
+  acceptedCount: number;
+  duplicates: string[];
+  oversized: string[];
+  capExceeded: number;
+}
+
 export interface OcrFile {
   id: string;
   file: File;
@@ -34,7 +44,7 @@ interface OcrState {
   textCache: Record<string, string>;
   lastClearedSnapshot: UndoSnapshot | null;
 
-  addFiles: (files: File[]) => void;
+  addFiles: (files: File[]) => AddFilesResult;
   setActiveFile: (id: string) => void;
   removeFile: (id: string) => void;
   clearAll: () => void;
@@ -234,29 +244,58 @@ export const useOcrStore = create<OcrState>()(
       setFontSize: (size) => set({ fontSize: Math.min(28, Math.max(12, Math.round(size))) }),
 
       addFiles: (newFiles) => {
-        set((state) => {
-          const remainingSlots = MAX_FILES - state.files.length;
-          const accepted = newFiles.slice(0, Math.max(0, remainingSlots));
+        const state = get();
+        const existingKeys = new Set(state.files.map((f) => cacheKey(f.file)));
+        const duplicates: string[] = [];
+        const oversized: string[] = [];
+        const seenInBatch = new Set<string>();
+        const valid: File[] = [];
 
-          const ocrFiles: OcrFile[] = accepted.map((f) => {
-            const cached = state.textCache[cacheKey(f)];
+        for (const f of newFiles) {
+          const key = cacheKey(f);
+          if (f.size > MAX_FILE_SIZE_BYTES) {
+            oversized.push(f.name);
+            continue;
+          }
+          if (existingKeys.has(key) || seenInBatch.has(key)) {
+            duplicates.push(f.name);
+            continue;
+          }
+          seenInBatch.add(key);
+          valid.push(f);
+        }
+
+        const remainingSlots = Math.max(0, MAX_FILES - state.files.length);
+        const accepted = valid.slice(0, remainingSlots);
+        const capExceeded = valid.length - accepted.length;
+
+        if (accepted.length > 0) {
+          set((s) => {
+            const ocrFiles: OcrFile[] = accepted.map((f) => {
+              const cached = s.textCache[cacheKey(f)];
+              return {
+                id: crypto.randomUUID(),
+                file: f,
+                previewUrl: URL.createObjectURL(f),
+                status: cached ? 'success' : 'idle',
+                resultText: cached,
+              };
+            });
             return {
-              id: crypto.randomUUID(),
-              file: f,
-              previewUrl: URL.createObjectURL(f),
-              status: cached ? 'success' : 'idle',
-              resultText: cached,
+              files: [...s.files, ...ocrFiles],
+              activeFileId: s.activeFileId || ocrFiles[0]?.id || null,
+              globalStatus: 'idle',
+              globalProgress: 0,
             };
           });
+        }
 
-          const updated = [...state.files, ...ocrFiles];
-          return {
-            files: updated,
-            activeFileId: state.activeFileId || ocrFiles[0]?.id || null,
-            globalStatus: 'idle',
-            globalProgress: 0,
-          };
-        });
+        return {
+          acceptedCount: accepted.length,
+          duplicates,
+          oversized,
+          capExceeded,
+        };
       },
 
       setActiveFile: (id) => set({ activeFileId: id }),

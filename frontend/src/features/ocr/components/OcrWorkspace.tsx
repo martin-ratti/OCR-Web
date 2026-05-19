@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ocrSelectors, useOcrStore } from '../../../store/useOcrStore';
 import { exportDocx, exportSingleTxt } from '../../../lib/exporters';
+import { reportAddFilesResult } from '../../../lib/addFilesFeedback';
 import { KawaiiModal } from './KawaiiModal';
 import { OriginalViewer } from './OriginalViewer';
 import { ExtractedEditor, type ExtractedEditorHandle } from './ExtractedEditor';
@@ -141,12 +142,17 @@ export function OcrWorkspace() {
 
   const handleFilesPicked = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
-    const arr = Array.from(e.target.files).filter((f) => f.type.startsWith('image/'));
+    const all = Array.from(e.target.files);
+    const arr = all.filter((f) => f.type.startsWith('image/'));
+    const rejected = all.length - arr.length;
     if (arr.length === 0) {
-      toast.warning('Sólo imágenes permitidas');
+      reportAddFilesResult(
+        { acceptedCount: 0, duplicates: [], oversized: [], capExceeded: 0 },
+        rejected || all.length,
+      );
     } else {
-      addFiles(arr);
-      toast.success(`${arr.length} imagen(es) agregada(s)`);
+      const result = addFiles(arr);
+      reportAddFilesResult(result, rejected);
     }
     e.target.value = '';
   };
@@ -229,12 +235,17 @@ export function OcrWorkspace() {
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDraggingOver(false);
-    const arr = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/'));
+    const all = Array.from(e.dataTransfer.files);
+    const arr = all.filter((f) => f.type.startsWith('image/'));
+    const rejected = all.length - arr.length;
     if (arr.length === 0) {
-      toast.warning('Sólo imágenes permitidas');
+      reportAddFilesResult(
+        { acceptedCount: 0, duplicates: [], oversized: [], capExceeded: 0 },
+        rejected || all.length,
+      );
     } else {
-      addFiles(arr);
-      toast.success(`${arr.length} imagen(es) agregada(s)`);
+      const result = addFiles(arr);
+      reportAddFilesResult(result, rejected);
     }
   };
 

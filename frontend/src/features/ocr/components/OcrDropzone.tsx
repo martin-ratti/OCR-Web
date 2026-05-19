@@ -1,6 +1,6 @@
 import React, { useCallback, useRef, useState } from 'react';
-import { toast } from 'sonner';
 import { useOcrStore } from '../../../store/useOcrStore';
+import { reportAddFilesResult } from '../../../lib/addFilesFeedback';
 import { ImagePlus, Images, Heart, Folder, UploadCloud, FileImage } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
@@ -10,12 +10,6 @@ function partitionImages(files: FileList | File[]): { images: File[]; rejected: 
   const arr = Array.from(files);
   const images = arr.filter((f) => f.type.startsWith('image/'));
   return { images, rejected: arr.length - images.length };
-}
-
-function warnIfRejected(rejected: number) {
-  if (rejected > 0) {
-    toast.warning(`${rejected} archivo(s) ignorado(s) — sólo imágenes permitidas.`);
-  }
 }
 
 export function OcrDropzone() {
@@ -42,8 +36,15 @@ export function OcrDropzone() {
       setIsDragging(false);
       if (e.dataTransfer.files?.length) {
         const { images, rejected } = partitionImages(e.dataTransfer.files);
-        warnIfRejected(rejected);
-        if (images.length) addFiles(images);
+        if (images.length) {
+          const result = addFiles(images);
+          reportAddFilesResult(result, rejected);
+        } else if (rejected > 0) {
+          reportAddFilesResult(
+            { acceptedCount: 0, duplicates: [], oversized: [], capExceeded: 0 },
+            rejected,
+          );
+        }
       }
     },
     [addFiles]
@@ -52,8 +53,15 @@ export function OcrDropzone() {
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       const { images, rejected } = partitionImages(e.target.files);
-      warnIfRejected(rejected);
-      if (images.length) addFiles(images);
+      if (images.length) {
+        const result = addFiles(images);
+        reportAddFilesResult(result, rejected);
+      } else if (rejected > 0) {
+        reportAddFilesResult(
+          { acceptedCount: 0, duplicates: [], oversized: [], capExceeded: 0 },
+          rejected,
+        );
+      }
     }
     e.target.value = '';
   };
@@ -61,7 +69,12 @@ export function OcrDropzone() {
   const handleFolderSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       const { images, rejected } = partitionImages(e.target.files);
-      warnIfRejected(rejected);
+      if (rejected > 0) {
+        reportAddFilesResult(
+          { acceptedCount: 0, duplicates: [], oversized: [], capExceeded: 0 },
+          rejected,
+        );
+      }
       if (images.length > 0) {
         setPendingFiles(images);
         setShowFolderConfirm(true);
@@ -71,7 +84,8 @@ export function OcrDropzone() {
   };
 
   const confirmFolderUpload = () => {
-    addFiles(pendingFiles);
+    const result = addFiles(pendingFiles);
+    reportAddFilesResult(result);
     setPendingFiles([]);
     setShowFolderConfirm(false);
   };
