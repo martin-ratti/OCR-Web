@@ -24,7 +24,7 @@ class StubAdapter implements OcrAdapter {
 }
 
 function appWith(adapter: OcrAdapter, opts?: { withPaddle?: boolean }) {
-  const overrides: Partial<Record<'gemini' | 'paddle', OcrAdapter>> = { gemini: adapter };
+  const overrides: Partial<Record<'gemini' | 'paddle' | 'groq', OcrAdapter>> = { gemini: adapter };
   if (opts?.withPaddle) overrides.paddle = adapter;
   const service = new OcrService(overrides);
   const controller = new OcrController(service);

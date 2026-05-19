@@ -54,7 +54,10 @@ interface OcrState {
 }
 
 const MAX_FILES = 200;
+// Pausa entre archivos por motor. Gemini free = 15 RPM → 4s mínimo.
+// Groq free = 30 RPM → 2s mínimo. Paddle (local) = 0.
 const INTER_FILE_DELAY_MS = 5000;
+const INTER_FILE_DELAY_GROQ_MS = 2500;
 const MAX_ATTEMPTS = 5;
 const UNDO_TTL_MS = 12_000;
 
@@ -385,7 +388,11 @@ export const useOcrStore = create<OcrState>()(
             // free-tier ceiling. The local engine has no per-minute quota,
             // so we only pay the cost of `prewarm` between images.
             const interFileDelay =
-              get().selectedEngine === 'paddle' ? 0 : INTER_FILE_DELAY_MS;
+              get().selectedEngine === 'paddle'
+                ? 0
+                : get().selectedEngine === 'groq'
+                  ? INTER_FILE_DELAY_GROQ_MS
+                  : INTER_FILE_DELAY_MS;
             await Promise.all([
               prewarm,
               interFileDelay === 0
@@ -490,7 +497,11 @@ export const useOcrStore = create<OcrState>()(
             // free-tier ceiling. The local engine has no per-minute quota,
             // so we only pay the cost of `prewarm` between images.
             const interFileDelay =
-              get().selectedEngine === 'paddle' ? 0 : INTER_FILE_DELAY_MS;
+              get().selectedEngine === 'paddle'
+                ? 0
+                : get().selectedEngine === 'groq'
+                  ? INTER_FILE_DELAY_GROQ_MS
+                  : INTER_FILE_DELAY_MS;
             await Promise.all([
               prewarm,
               interFileDelay === 0

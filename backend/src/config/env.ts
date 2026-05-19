@@ -5,6 +5,8 @@ dotenv.config();
 
 const EnvSchema = z.object({
   GEMINI_API_KEY: z.string().min(1).optional(),
+  GROQ_API_KEY: z.string().min(1).optional(),
+  GROQ_MODEL_ID: z.string().min(1).default('meta-llama/llama-4-scout-17b-16e-instruct'),
   PORT: z.coerce.number().int().positive().default(3001),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   ALLOWED_ORIGINS: z

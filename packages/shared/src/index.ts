@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const OcrEngineSchema = z.enum(['gemini', 'paddle']).default('gemini');
+export const OcrEngineSchema = z.enum(['gemini', 'paddle', 'groq']).default('gemini');
 export type OcrEngine = z.infer<typeof OcrEngineSchema>;
 
 export const ExtractRequestSchema = z.object({

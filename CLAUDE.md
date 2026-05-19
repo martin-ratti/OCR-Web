@@ -26,6 +26,8 @@ Frontend (`pnpm --filter frontend <cmd>` or run inside `frontend/`):
 
 Backend env lives in `backend/.env`:
 - `GEMINI_API_KEY` — optional at boot (Zod `.optional()` in `env.ts`). Required for the **gemini** engine; the adapter throws on first request if missing. The local engine (`paddle` value in the UI / shared schema) runs entirely in the browser via Tesseract.js, so it works with no backend key — and in fact never hits the backend at all.
+- `GROQ_API_KEY` — optional at boot. Required for the **groq** engine (Llama 4 Scout Vision via OpenAI-compatible `api.groq.com/openai/v1/chat/completions`). Free tier: 1000 RPD / 30 RPM — ~50× more headroom than Gemini free, so this is the recommended hosted engine for heavy batches.
+- `GROQ_MODEL_ID` — defaults to `meta-llama/llama-4-scout-17b-16e-instruct`. Override only if Groq deprecates/renames the model.
 - `ALLOWED_ORIGINS` — comma-separated CORS whitelist; defaults to `http://localhost:5173,http://localhost:4173`. Use `*` only in dev.
 - `NODE_ENV` — `development` | `production` | `test` (default `development`).
 - `PORT` — default `3001`.
@@ -50,22 +52,23 @@ Middleware order in `createApp`: `helmet()` → `requestId` → `metricsMiddlewa
 
 Per-feature layering under `features/<feature>/`:
 
-`router` (per-route middlewares: `ocrLimiter` + `uploadImage.single`) → `controller` (HTTP shape; parses `engine` field with `ExtractRequestSchema`, throws `HttpError`/delegates to `next(err)`) → `service` (picks adapter per `OcrEngine`, lazily constructs the chosen one; accepts override map for DI) → `adapter` (`GeminiOcrAdapter` only; the `paddle` engine moved to the browser) → `schema` (Zod contracts re-exported from `@ocr-web/shared`).
+`router` (per-route middlewares: `ocrLimiter` + `uploadImage.single`) → `controller` (HTTP shape; parses `engine` field with `ExtractRequestSchema`, throws `HttpError`/delegates to `next(err)`) → `service` (picks adapter per `OcrEngine`, lazily constructs the chosen one; accepts override map for DI) → `adapter` (`GeminiOcrAdapter` + `GroqOcrAdapter`; the `paddle` engine moved to the browser) → `schema` (Zod contracts re-exported from `@ocr-web/shared`).
 
 **Server-side engine: only Gemini.** The `OcrEngineSchema` enum still includes `'paddle'` for backwards-compat with persisted client state, but the backend rejects `engine === 'paddle'` with HTTP 410 in `OcrService.getAdapter`. The local engine runs **entirely in the browser** via Tesseract.js (`frontend/src/lib/tesseractAdapter.ts`):
-- `GeminiOcrAdapter` — calls `@google/genai` with the pinned model, `temperature: 0`, `topP: 0.1`, `thinkingBudget: 1024`, 60s timeout (raced against SDK). Best quality (~99%) but rate-limited by the free tier (15 RPM / 1000 RPD per project).
+- `GeminiOcrAdapter` — calls `@google/genai` with the pinned model, `temperature: 0`, `topP: 0.1`, `thinkingBudget: 1024`, 60s timeout (raced against SDK). Uses the strict `HIGHLIGHT_EXTRACTION_PROMPT` (chromatic-filter). Free tier 15 RPM / 20 RPD per project (free-tier daily cap is 20, not 1000 — verified by Render logs).
+- `GroqOcrAdapter` — calls Groq's OpenAI-compatible chat completions endpoint (`api.groq.com/openai/v1/chat/completions`) with `meta-llama/llama-4-scout-17b-16e-instruct` (configurable via `GROQ_MODEL_ID`). Uses `FULL_PAGE_EXTRACTION_PROMPT` because Groq is stricter than Gemini on pale highlights and tends to return the no-text sentinel; full-page mode hits 96% word recall vs Gemini ground truth on the same images (Gemini-strict prompt drops to 50%). 60s timeout via `AbortController`; explicit 429/5xx mapping. Free tier 30 RPM / 1000 RPD — recommended for batch workloads.
 - `recognizeLocal` (browser) — Canvas-based HSV highlight mask (`highlightMaskCanvas.ts`) → 3× upscale → Tesseract.js worker (Spanish + English traineddata, PSM SINGLE_BLOCK, LSTM-only). Two-pass with 180° fallback driven by a Spanish trigram-density score (book photos with no EXIF orientation tag would otherwise come out as gibberish). Worker is module-level cached, auto-terminated after 5 min idle to free ~150 MB.
 
 **Highlight contract is shared.** Both engines must respect `NO_HIGHLIGHT_SENTINEL` (`"No se detectó texto resaltado en esta imagen."`). The Canvas mask exists so the local engine matches the Gemini prompt's chromatic-filter semantics — if you change the prompt to look at non-highlighted text, you must also relax `highlightMaskCanvas.ts` or the two engines will diverge silently.
 
 Shared config in `backend/src/config/`:
 - `env.ts` — Zod-validated env. `GEMINI_API_KEY` is `.optional()` at boot. The server only throws if a request hits the Gemini adapter without a key. The local engine never reaches the backend, so a missing key is fine if users always pick the local engine.
-- `prompt.ts` — `HIGHLIGHT_EXTRACTION_PROMPT` + `NO_HIGHLIGHT_SENTINEL`. Tune prompt here, never the model.
+- `prompt.ts` — `HIGHLIGHT_EXTRACTION_PROMPT` (chromatic filter, used by Gemini) + `FULL_PAGE_EXTRACTION_PROMPT` (transcribe everything, used by Groq) + `NO_HIGHLIGHT_SENTINEL`. Tune prompts here, never the models.
 - `logger.ts` — timestamped console wrapper; `info` gated by `NODE_ENV`. `withRequestId(id)` returns a scoped logger for per-request correlation.
 
 Middlewares in `backend/src/middlewares/`:
 - `upload.ts` — `uploadImage` multer instance: memory storage, 5 MB, 1 file max, `fileFilter` whitelists `jpeg|png|webp|gif|heic|heif`.
-- `rateLimit.ts` — two limiters. `ocrLimiter` (12 req/min per IP, aligned to Gemini's 15 RPM) on `/api/ocr/*`; `globalLimiter` (300 req / 15 min per IP) app-wide.
+- `rateLimit.ts` — two limiters. `ocrLimiter` (25 req/min per IP, leaves headroom for Groq's 30 RPM ceiling while still tripping abuse before Gemini's 15 RPM) on `/api/ocr/*`; `globalLimiter` (300 req / 15 min per IP) app-wide.
 - `errorHandler.ts` — terminal middleware. Maps `MulterError` (413 on `LIMIT_FILE_SIZE`, else 400), `HttpError`, Gemini rate-limit detection (429), and unknown → 500. Always returns `ExtractResponse`-shaped JSON.
 - `requestId.ts` — assigns/propagates `X-Request-Id` header; attaches `req.requestId` for logger scoping.
 - `metrics.ts` — in-process counters exposed at `GET /metrics` in Prometheus text format (`renderMetrics()`). `recordOcrSuccess()` / `recordOcrError(isRateLimit)` are called by the controller.
@@ -76,7 +79,7 @@ Health: `GET /health` returns `{ status: 'ok', timestamp }`. Use it for Render u
 
 Feature-Sliced-Design-lite. Layers:
 - `features/ocr/components/` — presentation (Shadcn/Radix + Tailwind). `OcrDropzone` and `OcrWorkspace` are the two top-level states.
-- `store/useOcrStore.ts` — Zustand store; owns queue, per-file status, global progress, abort controller, and the upload loops (`processAll` / `processOne` / `processSelected` / `retryAllErrors` / `cancel` / `clearAll` with undo). `MAX_FILES = 200` ceiling; `INTER_FILE_DELAY_MS = 5000`; `MAX_ATTEMPTS = 5`.
+- `store/useOcrStore.ts` — Zustand store; owns queue, per-file status, global progress, abort controller, and the upload loops (`processAll` / `processOne` / `processSelected` / `retryAllErrors` / `cancel` / `clearAll` with undo). `MAX_FILES = 200` ceiling; `MAX_ATTEMPTS = 5`. Inter-file pause depends on engine: Gemini = 5000 ms (15 RPM ceiling), Groq = 2500 ms (30 RPM ceiling), Paddle = 0 (browser-local).
 - **Persistence.** Wrapped with `zustand/middleware` `persist` (`name: 'ocr-web-state'`, `version: 4`, `localStorage`). `partialize` persists only `selectedEngine`, `fontSize`, and `textCache`. `textCache` is keyed by `${file.name}::${file.size}` so re-adding an already-OCR'd file rehydrates the result without another API call — do not bypass this cache when wiring new ingestion paths. If you change `textCache` shape, bump the persist `version`.
 - **Prewarm pipeline.** While file *i* is in Gemini, file *i+1* is pre-compressed in parallel (`ensureCompressed` stores the resulting `File` on the queue entry). Keep this; losing it ~doubles wall-clock on batches.
 - **Undo.** `clearAll` snapshots the queue + active id and keeps it for 12s before revoking preview URLs. `restoreCleared` rehydrates if called before expiry. If you remove files programmatically, use `removeFiles(ids)` so preview URLs are revoked.
@@ -95,7 +98,7 @@ Gemini 2.5 Flash-Lite free-tier ceilings (per project, not per key):
 
 Backpressure is layered:
 - **Client** (`useOcrStore.processAll`): 5 s pause between files, `AbortController` shared across the run, 5 retry attempts per file. Backoff is 15·n s on `RateLimit` (429/503/quota-regex matches) and 3·n s on generic errors.
-- **Server** (`middlewares/rateLimit.ts`): `ocrLimiter` caps 12 req/min per IP on `/api/ocr/*` — deliberately below Gemini's 15 RPM so abusive clients trip the server before the Gemini quota does.
+- **Server** (`middlewares/rateLimit.ts`): `ocrLimiter` caps 25 req/min per IP on `/api/ocr/*` — between Gemini's 15 RPM (cliente legítimo trip Gemini antes que esto) and Groq's 30 RPM (cliente Groq tiene headroom). Abusivos chocan acá antes que con upstream.
 
 Status machine per file: `idle → processing → success | error`. Retries between attempts surface via `infoMessage`; terminal failures surface via `errorMessage`. They are distinct fields — `resultText` is never overwritten by an error string.
 

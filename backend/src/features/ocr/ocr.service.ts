@@ -1,6 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import { env } from '../../config/env';
-import { HIGHLIGHT_EXTRACTION_PROMPT } from '../../config/prompt';
+import { HIGHLIGHT_EXTRACTION_PROMPT, FULL_PAGE_EXTRACTION_PROMPT } from '../../config/prompt';
 import { logger } from '../../config/logger';
 import type { OcrEngine } from '@ocr-web/shared';
 import { HttpError } from '../../middlewares/errorHandler';
@@ -59,9 +59,87 @@ export class GeminiOcrAdapter implements OcrAdapter {
   }
 }
 
+// Groq Llama 4 Scout vision. Free tier: 1000 req/día y 30 req/min,
+// muy por encima de Gemini free (20 RPD). Misma calidad de OCR para
+// el caso de uso (texto resaltado o página completa) sin cuota
+// asfixiante. Endpoint OpenAI-compatible, no requiere SDK.
+const GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_TIMEOUT_MS = 60_000;
+
+export class GroqOcrAdapter implements OcrAdapter {
+  private readonly apiKey: string;
+  private readonly modelId: string;
+
+  constructor(apiKey: string | undefined = env.GROQ_API_KEY, modelId: string = env.GROQ_MODEL_ID) {
+    if (!apiKey) {
+      throw new Error('GROQ_API_KEY no configurada. Agregá la key en backend/.env o usá otro motor.');
+    }
+    this.apiKey = apiKey;
+    this.modelId = modelId;
+  }
+
+  async extractText(imageBuffer: Buffer, mimeType: string): Promise<string> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), GROQ_TIMEOUT_MS);
+    const dataUrl = `data:${mimeType};base64,${imageBuffer.toString('base64')}`;
+
+    try {
+      const res = await fetch(GROQ_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: this.modelId,
+          temperature: 0,
+          top_p: 0.1,
+          max_tokens: 4096,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: FULL_PAGE_EXTRACTION_PROMPT },
+                { type: 'image_url', image_url: { url: dataUrl } },
+              ],
+            },
+          ],
+        }),
+      });
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        const snippet = body.slice(0, 400);
+        if (res.status === 429) {
+          throw new Error(`Groq rate limit (429): ${snippet}`);
+        }
+        if (res.status === 503 || res.status === 502 || res.status === 504) {
+          throw new Error(`Groq upstream unavailable (${res.status}): ${snippet}`);
+        }
+        throw new Error(`Groq HTTP ${res.status}: ${snippet}`);
+      }
+
+      const json = await res.json() as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+      const text = json.choices?.[0]?.message?.content ?? '';
+      return typeof text === 'string' ? text.trim() : '';
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new Error(`Groq timeout after ${GROQ_TIMEOUT_MS}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
 export class OcrService {
   private readonly overrides: Partial<Record<OcrEngine, OcrAdapter>>;
   private geminiAdapter: OcrAdapter | null = null;
+  private groqAdapter: OcrAdapter | null = null;
 
   constructor(adapters?: Partial<Record<OcrEngine, OcrAdapter>>) {
     this.overrides = adapters ?? {};
@@ -72,6 +150,11 @@ export class OcrService {
       if (this.overrides.gemini) return this.overrides.gemini;
       if (!this.geminiAdapter) this.geminiAdapter = new GeminiOcrAdapter();
       return this.geminiAdapter;
+    }
+    if (engine === 'groq') {
+      if (this.overrides.groq) return this.overrides.groq;
+      if (!this.groqAdapter) this.groqAdapter = new GroqOcrAdapter();
+      return this.groqAdapter;
     }
     // Paddle fue retirado del backend: el motor local ahora corre en el navegador
     // (tesseract.js). El frontend nunca debería llegar acá con engine=paddle,

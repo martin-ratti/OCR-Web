@@ -3,28 +3,30 @@
 // locally without burning the shared Gemini quota and without paying for a
 // Render instance large enough to run a server-side OCR engine.
 //
+// Strategy: OCR the full page directly. Earlier versions masked highlighted
+// regions only (HSV + Otsu) to match the Gemini "extract highlighted text"
+// prompt contract, but real photos from end users had pale/inconsistent
+// highlights → mask discarded most of the legible page, dropping similarity
+// vs Gemini from ~0.65 to ~0.35. Full-page mode gives ~0.72 sim / 0.83
+// word-recall on the same corpus and the user explicitly prefers legibility
+// over strict highlight filtering.
+//
 // Design notes:
 //   - One module-level worker is reused across recognitions; spinning a new
 //     worker per image would re-download the ~10 MB language model each time.
-//   - `createWorker` lazy-loads on first call and exposes a progress callback
-//     so the UI can show "Cargando motor local 47%..." during the initial fetch.
 //   - The worker is auto-terminated after `IDLE_TERMINATE_MS` of inactivity
 //     to free the ~150 MB it pins; the next request transparently re-creates it.
-//   - The `eng` traineddata is loaded alongside `spa` because Tesseract benefits
-//     from a polyglot dictionary on highlighted notes that mix Spanish text
-//     with English technical terms (e.g. "interface", "API").
+//   - `eng` traineddata is loaded alongside `spa` because Spanish notes often
+//     mix English technical terms.
 
 import { createWorker, PSM, type Worker } from 'tesseract.js';
-import { buildMaskedImageData, hasEnoughHighlight, maskedImageDataToBlob } from './highlightMaskCanvas';
 
-const NO_HIGHLIGHT_SENTINEL = 'No se detectó texto resaltado en esta imagen.';
 const IDLE_TERMINATE_MS = 5 * 60 * 1000;
 const UPSCALE_FACTOR = 3;
+const MAX_INPUT_WIDTH = 1600;
 
 export interface TesseractProgress {
-  /** Discrete phase, useful to show different copy ("downloading" vs "recognising"). */
   status: 'loading' | 'recognizing' | 'idle';
-  /** 0..1 within the current phase. */
   progress: number;
 }
 
@@ -70,16 +72,6 @@ export async function terminateWorker(): Promise<void> {
   }
 }
 
-/**
- * Lazy-create a worker pre-configured for Spanish + English with parameters
- * tuned for highlighted hand-marked text:
- *   - PSM 6 (single block) handles paragraph-style highlighted notes well.
- *   - LSTM-only engine (OEM 1) — the legacy Tesseract 3 engine still ships in
- *     the wasm bundle but is significantly worse on photographed text.
- *   - Preserve interword spaces so we don't fight the line joiner.
- *   - Tighten the character whitelist? Skip — the highlighted text often
- *     contains punctuation and digits, and whitelisting harms accents.
- */
 async function getWorker(): Promise<Worker> {
   if (workerPromise) {
     lastUsedAt = Date.now();
@@ -89,9 +81,6 @@ async function getWorker(): Promise<Worker> {
     emit({ status: 'loading', progress: 0 });
     const worker = await createWorker(['spa', 'eng'], 1, {
       logger: (m: { status: string; progress: number }) => {
-        // tesseract.js emits messages such as "loading language traineddata"
-        // (during init) and "recognizing text" (during recognize). Map both
-        // to a coarse status the UI can render.
         if (m.status === 'recognizing text') {
           emit({ status: 'recognizing', progress: m.progress });
         } else if (typeof m.progress === 'number' && m.progress > 0 && m.progress < 1) {
@@ -100,11 +89,11 @@ async function getWorker(): Promise<Worker> {
       },
     });
     await worker.setParameters({
-      tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
+      // AUTO segmentation handles multi-paragraph book pages with headers,
+      // footers, and indented blocks better than SINGLE_BLOCK, which assumed
+      // a single tightly-packed paragraph (mask-mode worldview).
+      tessedit_pageseg_mode: PSM.AUTO,
       preserve_interword_spaces: '1',
-      // user_defined_dpi avoids the "Estimating resolution as N" warning that
-      // Tesseract logs when it cannot read DPI from the image header. Setting
-      // it explicitly also helps the LSTM engine pick a sensible scale.
       user_defined_dpi: '300',
     });
     emit({ status: 'idle', progress: 1 });
@@ -115,13 +104,6 @@ async function getWorker(): Promise<Worker> {
   return workerPromise;
 }
 
-/**
- * Lightweight readability heuristic to drop OCR garbage lines: counts how many
- * tokens look like real Spanish words. Mirrors `isReadableSpanishLine` in the
- * server-side Paddle adapter so users see the same quality bar regardless of
- * engine. Tesseract is more accurate than Paddle on accented text but still
- * emits gibberish on edge artifacts (binding shadows, photo borders).
- */
 const COMMON_SHORT_WORDS = new Set([
   'a','al','ante','b','bajo','cabe','con','contra','cuyo','de','del',
   'desde','donde','durante','e','el','él','en','entre','es','esa',
@@ -136,8 +118,6 @@ const COMMON_SHORT_WORDS = new Set([
 function isReadableLine(line: string): boolean {
   const tokens = line.split(/\s+/).filter((t) => /\p{L}/u.test(t));
   if (tokens.length === 0) return false;
-  // Single-token lines are kept only if the token is reasonably long: a
-  // 3-letter blob alone is almost always OCR debris.
   if (tokens.length === 1) {
     const t = tokens[0].replace(/[^\p{L}À-ɏ]/gu, '');
     return t.length >= 4 || COMMON_SHORT_WORDS.has(t.toLowerCase());
@@ -151,28 +131,15 @@ function isReadableLine(line: string): boolean {
   return readable / tokens.length >= 0.45;
 }
 
-/**
- * Frequency of common Spanish letter trigrams. Real Spanish text scores
- * markedly higher than upside-down OCR'd Spanish (the latter produces lots of
- * uppercase blobs and rare accent positions). This is the orientation oracle.
- */
 const SPANISH_TRIGRAMS = new Set([
   'que', 'ent', 'aci', 'ció', 'cio', 'con', 'ado', 'and', 'des', 'est',
-  'par', 'ara', 'pro', 'cia', 'nte', 'res', 'tra', 'rec', 'ent', 'ist',
+  'par', 'ara', 'pro', 'cia', 'nte', 'res', 'tra', 'rec', 'ist',
   'una', 'los', 'las', 'del', 'mas', 'ien', 'sus', 'ue ', 'os ', 'es ',
   'do ', 'as ', 'la ', 'el ', 'en ', 'de ', 'an ', 'un ', 'se ', 'no ',
   'ona', 'ana', 'ora', 'eri', 'eli', 'tal', 'cul', 'ult', 'fac', 'sti',
   'ica', 'ido', 'ada', 'cer', 'ble', 'lib', 'der', 'pen', 'sen', 'ner',
 ]);
 
-/**
- * Score how Spanish-like the recognized text looks: ratio of common Spanish
- * trigrams found in the lowercased text. Used to decide if a 180° re-OCR is
- * needed (book photos often have no EXIF orientation tag, so the page can
- * come in upside-down). Trigrams beat the per-line readability heuristic
- * because upside-down OCR garbage often produces tokens that *look* word-like
- * (4+ letters) but contain no real Spanish letter sequences.
- */
 function scoreSpanishness(text: string): { score: number; matches: number; total: number } {
   const lc = text.toLowerCase();
   const total = Math.max(0, lc.length - 2);
@@ -184,10 +151,6 @@ function scoreSpanishness(text: string): { score: number; matches: number; total
   return { score: matches / total, matches, total };
 }
 
-/**
- * Rotate an ImageData 180° in-place via a fresh canvas. Cheap CPU op compared
- * to a Tesseract recognize (~3s vs ~30s).
- */
 function rotateImageData180(src: ImageData): ImageData {
   const { width, height, data } = src;
   const out = new ImageData(width, height);
@@ -205,11 +168,6 @@ function rotateImageData180(src: ImageData): ImageData {
   return out;
 }
 
-/**
- * Rotate ImageData 90° clockwise (width <-> height swap). WhatsApp strips
- * EXIF orientation, so book photos taken portrait often arrive landscape and
- * Tesseract sees columns of vertical text → gibberish without this fallback.
- */
 function rotateImageData90CW(src: ImageData): ImageData {
   const { width: w, height: h, data } = src;
   const out = new ImageData(h, w);
@@ -217,7 +175,6 @@ function rotateImageData90CW(src: ImageData): ImageData {
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const si = (y * w + x) * 4;
-      // (x, y) -> (h - 1 - y, x) in rotated coords; rotated width = h.
       const di = (x * h + (h - 1 - y)) * 4;
       dst[di] = data[si];
       dst[di + 1] = data[si + 1];
@@ -235,7 +192,6 @@ function rotateImageData270CW(src: ImageData): ImageData {
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const si = (y * w + x) * 4;
-      // (x, y) -> (y, w - 1 - x); rotated width = h.
       const di = ((w - 1 - x) * h + y) * 4;
       dst[di] = data[si];
       dst[di + 1] = data[si + 1];
@@ -247,24 +203,64 @@ function rotateImageData270CW(src: ImageData): ImageData {
 }
 
 /**
- * Run the local OCR pipeline on a single File.
- *
- * 1. Build the highlight mask in Canvas (HSV banding + shape filter + Otsu
- *    threshold). Returns the masked image as a binary PNG.
- * 2. If coverage is below the minimum, short-circuit with the same sentinel
- *    string the Gemini path uses, so downstream UI behaviour is identical.
- * 3. Hand the masked PNG to Tesseract upscaled `UPSCALE_FACTOR×` for better
- *    glyph resolution.
- * 4. If the first pass produces mostly garbage (Spanish-likeness < threshold),
- *    try the other 3 cardinal rotations (180°, 90° CW, 270° CW) — WhatsApp
- *    strips EXIF orientation so portrait book photos commonly arrive sideways
- *    or upside-down. Keep whichever pass scores highest on Spanish trigrams.
- * 5. Strip per-line OCR garbage and join.
+ * Decode a File/Blob, respect EXIF orientation, downscale to MAX_INPUT_WIDTH,
+ * and convert to grayscale ImageData. Grayscale (not binary) gives Tesseract
+ * room to discriminate stroke darkness — global Otsu binarisation at this
+ * stage can collapse faded ink and was a 5-10% accuracy hit in benchmarks.
  */
-// Spanish trigram density on real text typically ~0.05-0.10; rotated/garbage
-// OCR scores ~0.005-0.02. 0.035 splits clean text from garbage and is the
-// "good enough, no need to try more rotations" early-exit threshold.
-const MIN_SPANISHNESS = 0.030;
+async function fileToGrayImageData(blob: Blob): Promise<ImageData> {
+  const bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+  const srcW = bitmap.width;
+  const srcH = bitmap.height;
+  const scale = Math.min(1, MAX_INPUT_WIDTH / srcW);
+  const w = Math.round(srcW * scale);
+  const h = Math.round(srcH * scale);
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('Canvas 2D context unavailable');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close();
+  const data = ctx.getImageData(0, 0, w, h);
+  const px = data.data;
+  for (let i = 0; i < px.length; i += 4) {
+    const g = (0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]) | 0;
+    px[i] = g;
+    px[i + 1] = g;
+    px[i + 2] = g;
+  }
+  return data;
+}
+
+async function imageDataToBlob(imageData: ImageData, upscale: number): Promise<Blob> {
+  const w = imageData.width * upscale;
+  const h = imageData.height * upscale;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Canvas 2D context unavailable');
+  if (upscale === 1) {
+    ctx.putImageData(imageData, 0, 0);
+  } else {
+    const tmp = document.createElement('canvas');
+    tmp.width = imageData.width;
+    tmp.height = imageData.height;
+    tmp.getContext('2d')!.putImageData(imageData, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(tmp, 0, 0, w, h);
+  }
+  const blob = await new Promise<Blob | null>((res) =>
+    canvas.toBlob(res, 'image/png'),
+  );
+  if (!blob) throw new Error('Canvas toBlob failed');
+  return blob;
+}
+
 const GOOD_ENOUGH_SPANISHNESS = 0.035;
 
 type RotationFn = (src: ImageData) => ImageData;
@@ -281,7 +277,7 @@ async function recognizeRotation(
   rot: RotationFn | null,
 ): Promise<{ text: string; score: ReturnType<typeof scoreSpanishness> }> {
   const data = rot ? rot(base) : base;
-  const blob = await maskedImageDataToBlob(data, UPSCALE_FACTOR);
+  const blob = await imageDataToBlob(data, UPSCALE_FACTOR);
   const url = URL.createObjectURL(blob);
   try {
     const { data: ocr } = await worker.recognize(url);
@@ -291,11 +287,23 @@ async function recognizeRotation(
   }
 }
 
+/**
+ * Run the local OCR pipeline on a single File.
+ * 1. Decode + downscale + grayscale.
+ * 2. Try 4 cardinal rotations (book photos often arrive sideways from WhatsApp,
+ *    which strips EXIF orientation). Keep the one scoring highest on Spanish
+ *    trigrams; early-exit if the first pass is clearly clean.
+ * 3. Strip per-line garbage and join.
+ *
+ * Edge cases:
+ *   - If the image really has no Spanish text (a blank page or a different
+ *     language) the best score will stay under MIN_SPANISHNESS and we still
+ *     return whatever Tesseract gave us. Returning a sentinel here would hide
+ *     real OCR output from users whose pages are in English or contain mostly
+ *     equations — both legitimate cases for a law-textbook reader.
+ */
 export async function recognizeLocal(file: File): Promise<string> {
-  const masked = await buildMaskedImageData(file);
-  if (!hasEnoughHighlight(masked.coverage)) {
-    return NO_HIGHLIGHT_SENTINEL;
-  }
+  const gray = await fileToGrayImageData(file);
   const worker = await getWorker();
   lastUsedAt = Date.now();
 
@@ -303,26 +311,17 @@ export async function recognizeLocal(file: File): Promise<string> {
   let bestScore = { score: -1, matches: 0, total: 0 };
 
   for (const { fn } of ROTATIONS) {
-    const r = await recognizeRotation(worker, masked.imageData, fn);
+    const r = await recognizeRotation(worker, gray, fn);
     if (r.score.score > bestScore.score) {
       bestScore = r.score;
       bestText = r.text;
     }
-    // Early exit: first pass scored well, no need to try other orientations.
     if (bestScore.score >= GOOD_ENOUGH_SPANISHNESS) break;
-    // Also skip remaining rotations if the text is so short that scoring is
-    // unreliable (avoids 4× recognise on near-empty masks).
     if (bestScore.total < 30) break;
   }
 
   lastUsedAt = Date.now();
   scheduleIdleTermination();
-
-  // If even the best rotation is gibberish, return sentinel rather than dump
-  // unreadable text on the user. MIN_SPANISHNESS is the floor for "real text".
-  if (bestScore.score < MIN_SPANISHNESS && bestScore.total >= 30) {
-    return NO_HIGHLIGHT_SENTINEL;
-  }
 
   const cleaned = bestText
     .split('\n')
@@ -330,6 +329,5 @@ export async function recognizeLocal(file: File): Promise<string> {
     .filter((l) => l.length > 0)
     .filter(isReadableLine);
 
-  const joined = cleaned.join('\n').trim();
-  return joined.length > 0 ? joined : NO_HIGHLIGHT_SENTINEL;
+  return cleaned.join('\n').trim();
 }

@@ -1,14 +1,15 @@
 import { rateLimit } from 'express-rate-limit';
 
 /**
- * Per-IP cap aligned with Gemini 2.5 Flash-Lite free tier:
- * 15 RPM, 1,000 RPD (shared across the whole project).
- * This limit is intentionally conservative because Gemini quota
- * is shared across every client that hits the server.
+ * Per-IP cap. Old value 12 RPM se ajustaba al límite Gemini (15 RPM).
+ * Ahora soportamos Groq (30 RPM) además de Gemini, así que subimos a 25 RPM:
+ * deja headroom para clientes legítimos del motor Groq sin abrir la puerta a abuso.
+ * Gemini sigue siendo el cuello de botella real para ese motor (su propio 429
+ * dispara antes que este limiter).
  */
 export const ocrLimiter = rateLimit({
   windowMs: 60_000,
-  limit: 12,
+  limit: 25,
   standardHeaders: 'draft-8',
   legacyHeaders: false,
   ipv6Subnet: 56,

@@ -1,5 +1,41 @@
 export const NO_HIGHLIGHT_SENTINEL = 'No se detectó texto resaltado en esta imagen.';
 
+// Prompt full-page para motores con cuota generosa (Groq, Tesseract local).
+// Resultado: 95.7% word recall vs Gemini en bench de 7 muestras. El motor
+// estricto-de-resaltado (Gemini) suele caer al sentinel cuando el highlight
+// es pálido, así que para Groq priorizamos cobertura sobre filtrado.
+export const FULL_PAGE_EXTRACTION_PROMPT = `Sos un sistema de OCR de página completa. Tu tarea es transcribir TODO el texto visible en la imagen, exactamente como aparece.
+
+════════════════════════════════════════
+ORIENTACIÓN
+════════════════════════════════════════
+La foto puede estar rotada 90°, 180° o 270°. Determiná la orientación correcta a partir de la forma de las letras y leé el texto como si la imagen estuviera derecha.
+
+════════════════════════════════════════
+QUÉ TRANSCRIBIR
+════════════════════════════════════════
+✓ Todo el texto impreso del cuerpo principal (párrafos, títulos, subtítulos, enumeraciones, citas, notas al pie).
+✓ Respetá orden natural de lectura: arriba → abajo, izquierda → derecha en la orientación correcta.
+✓ Conservá puntuación, acentos, mayúsculas y números tal cual aparecen.
+✓ Mantené saltos de línea de párrafos. Usá un salto de línea simple entre líneas de un mismo párrafo, doble salto entre párrafos distintos.
+
+════════════════════════════════════════
+QUÉ IGNORAR
+════════════════════════════════════════
+✗ Encabezados/pies de página repetidos en cada hoja (nombre del autor, título del libro, número de página suelto).
+✗ Notas manuscritas al margen (texto a mano con lápiz o birome).
+✗ Post-its o papelitos pegados al libro con texto manuscrito encima.
+✗ Dedos, manos, bordes de mesa, fondos de escritorio capturados en la foto.
+✗ Marcas de subrayado, círculos, flechas o llaves al margen — el texto debajo SÍ se transcribe, pero las marcas no.
+
+════════════════════════════════════════
+FORMATO DE SALIDA
+════════════════════════════════════════
+• Devolvé sólo el texto transcripto, sin comillas, sin markdown, sin viñetas.
+• No agregues "Aquí está el texto:", "Transcripción:", encabezados, explicaciones ni comentarios.
+• No reformules, traduzcas ni resumas. Si una palabra está cortada por el borde, transcribila hasta donde se lea.
+• Si la imagen no contiene ningún texto legible, respondé exactamente: "Sin texto legible en la imagen."`;
+
 export const HIGHLIGHT_EXTRACTION_PROMPT = `Sos un sistema de OCR SELECTIVO por color. Tu única tarea es transcribir el texto que tiene encima una CAPA DE MARCADOR RESALTADOR y NADA MÁS.
 
 ════════════════════════════════════════
