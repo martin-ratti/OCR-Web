@@ -64,8 +64,10 @@ interface OcrState {
 }
 
 const MAX_FILES = 200;
-// Pausa entre archivos por motor. Gemini free = 15 RPM → 4s mínimo.
-// Groq free = 30 RPM → 2s mínimo. Paddle (local) = 0.
+// Pausa entre archivos por motor. Mínimo teórico (60s / RPM):
+// Gemini free = 15 RPM → 4s. Usamos 5s con margen para clock drift y latencia variable.
+// Groq free = 30 RPM → 2s. Usamos 2.5s con el mismo razonamiento.
+// Paddle/Tesseract local = 0 (no cuota).
 const INTER_FILE_DELAY_MS = 5000;
 const INTER_FILE_DELAY_GROQ_MS = 2500;
 const MAX_ATTEMPTS = 5;
@@ -86,9 +88,13 @@ async function ensureCompressed(state: OcrState, fileId: string): Promise<File> 
   return c;
 }
 
+type SetState = {
+  (partial: Partial<OcrState> | ((s: OcrState) => Partial<OcrState>)): void;
+};
+
 async function extractOneWithRetries(
   store: OcrState,
-  setState: (fn: (s: OcrState) => Partial<OcrState>) => void,
+  setState: SetState,
   fileId: string,
   signal: AbortSignal,
 ): Promise<void> {
@@ -388,7 +394,7 @@ export const useOcrStore = create<OcrState>()(
         cancelled = false;
         set({ globalStatus: 'working' });
         const state = get();
-        await extractOneWithRetries(state, set as never, id, abortController.signal);
+        await extractOneWithRetries(state, set, id, abortController.signal);
         if (!cancelled) set({ globalStatus: 'done' });
       },
 
@@ -417,7 +423,7 @@ export const useOcrStore = create<OcrState>()(
                 .catch(() => {})
             : Promise.resolve();
 
-          await extractOneWithRetries(get(), set as never, toProcess[i].id, signal);
+          await extractOneWithRetries(get(), set, toProcess[i].id, signal);
 
           const processedCount = i + 1;
           set({ globalProgress: Math.round((processedCount / toProcess.length) * 100) });
@@ -526,7 +532,7 @@ export const useOcrStore = create<OcrState>()(
                 .catch(() => {})
             : Promise.resolve();
 
-          await extractOneWithRetries(get(), set as never, toProcess[i].id, signal);
+          await extractOneWithRetries(get(), set, toProcess[i].id, signal);
 
           const processedCount = i + 1;
           set({ globalProgress: Math.round((processedCount / toProcess.length) * 100) });

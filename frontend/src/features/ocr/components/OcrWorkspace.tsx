@@ -224,7 +224,12 @@ export function OcrWorkspace() {
   }, [working, canEditorAct, files, activeFileId, cancel, setActiveFile]);
 
   const onDragOver = (e: React.DragEvent) => {
-    if (!Array.from(e.dataTransfer.items ?? []).some((i) => i.kind === 'file')) return;
+    // Firefox during dragOver expone `types` pero `items` puede estar vacío por
+    // seguridad. Chequeamos `types.includes('Files')` que sí es estándar en FF/Chrome.
+    const types = e.dataTransfer.types;
+    const hasFiles = types && (Array.from(types).includes('Files') ||
+      Array.from(e.dataTransfer.items ?? []).some((i) => i.kind === 'file'));
+    if (!hasFiles) return;
     e.preventDefault();
     setIsDraggingOver(true);
   };
