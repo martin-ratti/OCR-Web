@@ -24,9 +24,13 @@
 
 ## 🚀 Sobre el Proyecto
 
-`OCR Web` es una plataforma Fullstack de alto rendimiento diseñada para la extracción precisa de texto desde imágenes físicas o digitales. Surgida como la migración natural de una exitosa herramienta de escritorio en Python, esta plataforma reemplaza las complejas lógicas de pre-procesamiento manual (OpenCV HSV) y motores de reconocimiento heredados (Tesseract) por los avanzados modelos multimodales **Google Gemini API**. 
+`OCR Web` es una plataforma Fullstack de alto rendimiento diseñada para la extracción precisa de texto desde imágenes físicas o digitales. Surgida como la migración natural de una exitosa herramienta de escritorio en Python.
 
-Esto significa una reducción extrema en la carga de la CPU, nulas dependencias binarias, y una precisión abrumadora incluso en documentos mal iluminados, mal escaneados o con ruido introducido por sombras. Todo el poder de la IA en una UI/UX moderna, fluida y amigable.
+La app ofrece **tres motores de OCR seleccionables** desde la UI:
+
+- 🌸 **Gemini** (`gemini-2.5-flash-lite`) — Visión multimodal de Google. Prompt de **resaltado estricto**: extrae únicamente el texto pintado con marcador. Alta precisión, free tier muy ajustado (~20 RPD).
+- ⚡ **Groq Llama 4 Scout** (`meta-llama/llama-4-scout-17b-16e-instruct`) — Visión vía endpoint OpenAI-compatible. Prompt de **página completa**: transcribe todo el texto. ~96% word recall vs Gemini, **~10× más rápido**, free tier **1000 RPD / 30 RPM** (50× más que Gemini). Motor recomendado para uso intensivo.
+- 💻 **Local (Tesseract.js)** — Corre 100% en el navegador (WASM + traineddata `spa` + `eng`). Sin cuota, sin red, sin backend. ~86% word recall. Fallback total si las APIs hosted se caen o agotan quota.
 
 ## 🏛 Arquitectura "EstacionAR"
 
@@ -46,13 +50,14 @@ El proyecto adopta el concepto arquitectónico estricto de Clean Architecture ba
 
 **Backend:**
 - ⚙️ **Runtime:** Node.js + Express 5
-- 🧠 **Capa NLP/IA:** API `Google Gemini` (Visión Multimodal)
+- 🧠 **Capa NLP/IA:** Adaptadores intercambiables — `GeminiOcrAdapter` (`@google/genai`) y `GroqOcrAdapter` (REST OpenAI-compatible)
 - 🛡️ **Validación / Procesamiento:** `Zod` para contratos y `Multer` para procesamiento óptico de buffers en memoria.
 
 **Frontend:**
 - ⚛️ **Framework UI:** React + Vite
 - 🎨 **Estilado y Componentes:** Tailwind CSS, Shadcn/ui y Radix UI
 - 🗃️ **Estado Global:** Zustand
+- 🔤 **OCR Offline:** `tesseract.js` (WASM) — motor local sin cuota, full-page con 4 rotaciones + scoring trigrama español.
 
 ## 📂 Estructura del Proyecto
 
@@ -81,7 +86,9 @@ Al ser un ecosistema **Monorepo NPM**, el core del código se divide en Workspac
 ### 1. Requisitos Previos
 - Node.js (v20 o superior).
 - pnpm instalado globalmente (`npm install -g pnpm`).
-- Una API Key válida de Google Gemini.
+- *(Opcional)* API Key de [Google AI Studio](https://aistudio.google.com/) para el motor **Gemini**.
+- *(Opcional)* API Key de [Groq Console](https://console.groq.com/keys) para el motor **Groq** (recomendado — 50× más cuota que Gemini free).
+- *(Ninguna)* — el motor **Local** corre en el navegador y no necesita keys; alcanza para usar la app sin configurar nada del backend.
 
 ### 2. Preparación de Repositorio
 
@@ -93,12 +100,26 @@ pnpm install
 
 ### 3. Configuración de Entorno
 
-Ingresa al directorio backend, genera el archivo de ambiente y pega tu Key:
+Ingresá al directorio backend, generá el archivo de ambiente y pegá las keys que quieras habilitar (todas son opcionales — pero sin ninguna sólo funciona el motor Local):
 
 ```bash
 cd backend
-echo "GEMINI_API_KEY=tu_clave_aqui" > .env
+cat > .env <<EOF
+GEMINI_API_KEY=tu_clave_de_google_ai_studio
+GROQ_API_KEY=tu_clave_de_groq
+EOF
 ```
+
+Variables soportadas (todas con defaults razonables):
+
+| Variable          | Default                                          | Descripción                                                                              |
+|-------------------|--------------------------------------------------|------------------------------------------------------------------------------------------|
+| `GEMINI_API_KEY`  | —                                                | Necesaria si alguien selecciona el motor Gemini.                                         |
+| `GROQ_API_KEY`    | —                                                | Necesaria si alguien selecciona el motor Groq.                                           |
+| `GROQ_MODEL_ID`   | `meta-llama/llama-4-scout-17b-16e-instruct`      | Sobreescribir sólo si Groq deprecia o renombra el modelo.                                |
+| `PORT`            | `3001`                                           | Puerto HTTP local.                                                                       |
+| `NODE_ENV`        | `development`                                    | `development` / `production` / `test`.                                                   |
+| `ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:4173`    | CORS whitelist separada por comas. Usar `*` sólo en dev.                                 |
 
 ### 4. Lanzamiento
 
