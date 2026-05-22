@@ -54,6 +54,7 @@ interface OcrState {
 
   processAll: () => Promise<void>;
   processOne: (id: string) => Promise<void>;
+  forceRetry: (id: string) => Promise<void>;
   retryAllErrors: () => Promise<void>;
   processSelected: (ids: string[]) => Promise<void>;
   removeFiles: (ids: string[]) => void;
@@ -396,6 +397,31 @@ export const useOcrStore = create<OcrState>()(
         const state = get();
         await extractOneWithRetries(state, set, id, abortController.signal);
         if (!cancelled) set({ globalStatus: 'done' });
+      },
+
+      forceRetry: async (id) => {
+        const target = get().files.find((f) => f.id === id);
+        if (!target) return;
+        set((s) => {
+          const key = cacheKey(target.file);
+          const nextCache = { ...s.textCache };
+          delete nextCache[key];
+          return {
+            textCache: nextCache,
+            files: s.files.map((f) =>
+              f.id === id
+                ? {
+                    ...f,
+                    status: 'idle',
+                    resultText: undefined,
+                    errorMessage: undefined,
+                    infoMessage: undefined,
+                  }
+                : f,
+            ),
+          };
+        });
+        await get().processOne(id);
       },
 
       processAll: async () => {

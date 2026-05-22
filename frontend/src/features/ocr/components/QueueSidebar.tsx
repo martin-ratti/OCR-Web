@@ -6,7 +6,7 @@ import {
   CircleDashed,
   Files,
   ImageIcon,
-  RefreshCw,
+  RotateCcw,
   RotateCw,
   Trash2,
 } from 'lucide-react';
@@ -137,21 +137,25 @@ const FileRowInner = memo(function FileRowInner({
         </span>
       </button>
       <div className="flex items-center gap-0.5 pr-2">
-        {file.status === 'error' && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                onClick={() => onRetry(file.id)}
-                disabled={working}
-                aria-label={`Reintentar ${file.file.name}`}
-                className="p-1.5 rounded-full text-zinc-400 hover:text-emerald-500 hover:bg-emerald-50 disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
-              >
-                <RefreshCw className="w-4 h-4" aria-hidden />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent>Reintentar</TooltipContent>
-          </Tooltip>
-        )}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              onClick={() => onRetry(file.id)}
+              disabled={working || file.status === 'processing'}
+              aria-label={
+                file.status === 'success'
+                  ? `Reprocesar ${file.file.name}`
+                  : `Reintentar ${file.file.name}`
+              }
+              className="p-1.5 rounded-full text-zinc-400 hover:text-emerald-500 hover:bg-emerald-50 disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
+            >
+              <RotateCcw className="w-4 h-4" aria-hidden />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>
+            {file.status === 'success' ? 'Reprocesar (ignora caché)' : 'Reintentar'}
+          </TooltipContent>
+        </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
             <button

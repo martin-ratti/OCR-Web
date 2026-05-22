@@ -33,7 +33,7 @@ export function OcrWorkspace() {
   const updateFileResult = useOcrStore((s) => s.updateFileResult);
   const setActiveFile = useOcrStore((s) => s.setActiveFile);
   const processAll = useOcrStore((s) => s.processAll);
-  const processOne = useOcrStore((s) => s.processOne);
+  const forceRetry = useOcrStore((s) => s.forceRetry);
   const clearAll = useOcrStore((s) => s.clearAll);
   const restoreCleared = useOcrStore((s) => s.restoreCleared);
   const cancel = useOcrStore((s) => s.cancel);
@@ -379,7 +379,7 @@ export function OcrWorkspace() {
             successCount={counts.success}
             errorCount={counts.error}
             onSelect={setActiveFile}
-            onRetry={processOne}
+            onRetry={forceRetry}
             onRemove={removeFile}
             onRetryAllErrors={retryAllErrors}
             collapsed={sidebarCollapsed}
