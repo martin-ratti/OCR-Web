@@ -38,7 +38,7 @@ Frontend reads `VITE_API_URL` (base URL only — do **not** include `/api`; trai
 
 `rules.json` at the repo root is tracked (project-level rule config — don't delete as housekeeping). `scratch/` is gitignored workspace for local experiments; treat files there as throwaway and don't rely on them.
 
-Root `package.json` no longer pins any `onlyBuiltDependencies` — the previous entries (`sharp`, `onnxruntime-node`, `protobufjs`) were only required by the now-removed server-side Paddle engine.
+Root `package.json` no longer pins any `onlyBuiltDependencies` — the previous entries (`sharp`, `onnxruntime-node`, `protobufjs`) were only required by the now-removed server-side Paddle engine. `backend/package.json` pins `packageManager: pnpm@10.33.0`; don't bump it ad hoc — it locks the workspace lockfile format.
 
 ## Architecture ("EstacionAR")
 
@@ -55,11 +55,11 @@ Per-feature layering under `features/<feature>/`:
 `router` (per-route middlewares: `ocrLimiter` + `uploadImage.single`) → `controller` (HTTP shape; parses `engine` field with `ExtractRequestSchema`, throws `HttpError`/delegates to `next(err)`) → `service` (picks adapter per `OcrEngine`, lazily constructs the chosen one; accepts override map for DI) → `adapter` (`GeminiOcrAdapter` + `GroqOcrAdapter`; the `paddle` engine moved to the browser) → `schema` (Zod contracts re-exported from `@ocr-web/shared`).
 
 **Server-side engine: only Gemini.** The `OcrEngineSchema` enum still includes `'paddle'` for backwards-compat with persisted client state, but the backend rejects `engine === 'paddle'` with HTTP 410 in `OcrService.getAdapter`. The local engine runs **entirely in the browser** via Tesseract.js (`frontend/src/lib/tesseractAdapter.ts`):
-- `GeminiOcrAdapter` — calls `@google/genai` with the pinned model, `temperature: 0`, `topP: 0.1`, `thinkingBudget: 1024`, 60s timeout (raced against SDK). Uses the strict `HIGHLIGHT_EXTRACTION_PROMPT` (chromatic-filter). Free tier 15 RPM / 20 RPD per project (free-tier daily cap is 20, not 1000 — verified by Render logs).
-- `GroqOcrAdapter` — calls Groq's OpenAI-compatible chat completions endpoint (`api.groq.com/openai/v1/chat/completions`) with `meta-llama/llama-4-scout-17b-16e-instruct` (configurable via `GROQ_MODEL_ID`). Uses `FULL_PAGE_EXTRACTION_PROMPT` because Groq is stricter than Gemini on pale highlights and tends to return the no-text sentinel; full-page mode hits 96% word recall vs Gemini ground truth on the same images (Gemini-strict prompt drops to 50%). 60s timeout via `AbortController`; explicit 429/5xx mapping. Free tier 30 RPM / 1000 RPD — recommended for batch workloads.
-- `recognizeLocal` (browser) — Canvas-based HSV highlight mask (`highlightMaskCanvas.ts`) → 3× upscale → Tesseract.js worker (Spanish + English traineddata, PSM SINGLE_BLOCK, LSTM-only). Two-pass with 180° fallback driven by a Spanish trigram-density score (book photos with no EXIF orientation tag would otherwise come out as gibberish). Worker is module-level cached, auto-terminated after 5 min idle to free ~150 MB.
+- `GeminiOcrAdapter` — calls `@google/genai` with the pinned model, `temperature: 0`, `topP: 0.1`, `thinkingBudget: 1024`, **90 s timeout** (`GEMINI_TIMEOUT_MS = 90_000` in `ocr.service.ts`; previously 60 s but dense pages with many highlights legitimately took ~50 s and tripped premature timeouts). The timeout is implemented as a `Promise.race` against the SDK call. Uses `HIGHLIGHT_EXTRACTION_PROMPT` (chromatic filter) and is the **only** engine that respects `NO_HIGHLIGHT_SENTINEL`. Free tier 15 RPM / **20 RPD** per project (the Google dashboard says 1000 RPD but production logs confirm the real daily cap is 20; resets midnight Pacific).
+- `GroqOcrAdapter` — calls Groq's OpenAI-compatible chat completions endpoint (`api.groq.com/openai/v1/chat/completions`) with `meta-llama/llama-4-scout-17b-16e-instruct` (configurable via `GROQ_MODEL_ID`). Uses `FULL_PAGE_EXTRACTION_PROMPT` because Groq is stricter than Gemini on pale highlights and tends to return the no-text sentinel; full-page mode hits 96 % word recall vs Gemini ground truth on the same images (Gemini-strict prompt drops to 50 %). 60 s timeout via `AbortController`; explicit 429/5xx mapping. Free tier 30 RPM / 1000 RPD — recommended for batch workloads.
+- `recognizeLocal` (browser) — **no highlight mask anymore.** Earlier versions HSV-masked highlighted regions to mirror Gemini's chromatic-filter, but that dropped legible non-highlighted text and hurt similarity scores. The current pipeline OCRs the **full page** directly via a cached Tesseract.js worker (Spanish + English traineddata, **`PSM.AUTO`** — handles two-column layouts, headers/footers, and indented blocks better than `SINGLE_BLOCK`, which was tuned for the dead mask-mode worldview; LSTM-only). For unknown orientation it tries **four cardinal rotations** (0°/180°/90° CW/270° CW) and picks the result with the highest Spanish trigram-density score; it early-exits if the first pass is clearly clean. Worker is module-level cached and auto-terminated after 5 min idle to free ~150 MB. There is no `highlightMaskCanvas.ts` — do not look for it.
 
-**Highlight contract is shared.** Both engines must respect `NO_HIGHLIGHT_SENTINEL` (`"No se detectó texto resaltado en esta imagen."`). The Canvas mask exists so the local engine matches the Gemini prompt's chromatic-filter semantics — if you change the prompt to look at non-highlighted text, you must also relax `highlightMaskCanvas.ts` or the two engines will diverge silently.
+**Sentinel contract is Gemini-only, not shared.** Only the Gemini adapter respects `NO_HIGHLIGHT_SENTINEL` (`"No se detectó texto resaltado en esta imagen."`), because only `HIGHLIGHT_EXTRACTION_PROMPT` instructs the model to emit that exact string when nothing is highlighted. Groq and Local use `FULL_PAGE_EXTRACTION_PROMPT` and transcribe everything — they never produce the sentinel. Frontend code that special-cases the sentinel must therefore gate on `engine === 'gemini'`, or it will silently break when other engines return free-form text.
 
 Shared config in `backend/src/config/`:
 - `env.ts` — Zod-validated env. `GEMINI_API_KEY` is `.optional()` at boot. The server only throws if a request hits the Gemini adapter without a key. The local engine never reaches the backend, so a missing key is fine if users always pick the local engine.
@@ -91,10 +91,17 @@ Feature-Sliced-Design-lite. Layers:
 
 Response parsing uses `ExtractResponseSchema.safeParse` — don't bypass Zod and don't duplicate the interface.
 
+**Deps already in `frontend/package.json` — reach for these before inventing.** These were installed for specific cross-cutting needs; reuse them instead of pulling fresh libraries:
+- `docx` + `jszip` — exporters (`lib/exporters.ts`). Use these to emit `.docx` per file and to bundle a batch into a single `.zip`. Do not add a second word-processing or zip lib.
+- `sonner` — toast/notification surface. New non-blocking user feedback goes here, not into ad-hoc `<div>` banners.
+- `react-window` — virtualized list. Required when iterating `files[]` in a scrollable list, since the queue can reach `MAX_FILES = 200`. Plain `.map()` over the queue will jank.
+- `next-themes` — dark-mode provider. If asked for a theme toggle, wire through this; don't roll a custom `useEffect`-based one.
+- `axios` is listed as a dep but the only HTTP path used today is `fetch` in `shared/api.ts`. Prefer `fetch` for consistency — pulling in `axios` for a new call is a smell.
+
 ### Orchestrator / rate-limit strategy (critical)
 
 Gemini 2.5 Flash-Lite free-tier ceilings (per project, not per key):
-- **15 RPM** / **250k TPM** / **1000 RPD** (resets midnight Pacific).
+- **15 RPM** / **250k TPM** / **20 RPD** (resets midnight Pacific). Google's dashboard advertises 1000 RPD but production logs show the real daily cap is 20 — plan around 20.
 
 Backpressure is layered:
 - **Client** (`useOcrStore.processAll`): 5 s pause between files, `AbortController` shared across the run, 5 retry attempts per file. Backoff is 15·n s on `RateLimit` (429/503/quota-regex matches) and 3·n s on generic errors.
