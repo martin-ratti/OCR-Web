@@ -4,36 +4,78 @@ export const NO_HIGHLIGHT_SENTINEL = 'No se detectó texto resaltado en esta ima
 // Resultado: 95.7% word recall vs Gemini en bench de 7 muestras. El motor
 // estricto-de-resaltado (Gemini) suele caer al sentinel cuando el highlight
 // es pálido, así que para Groq priorizamos cobertura sobre filtrado.
-export const FULL_PAGE_EXTRACTION_PROMPT = `Sos un sistema de OCR de página completa. Tu tarea es transcribir TODO el texto visible en la imagen, exactamente como aparece.
+//
+// Reglas críticas (no las saques sin re-correr el bench):
+// 1. "Transcripción literal" — el modelo Llama tiende a corregir typos del
+//    original. Para texto legal eso es un bug, no una feature: si el libro
+//    dice "males tratos" hay que dejarlo.
+// 2. Superíndices de notas al pie — preservarlos con ^N. Sin la regla
+//    explícita, Llama los borra.
+// 3. Manuscritos — marcarlos con [m: ...]. La regla anterior los ignoraba
+//    al margen pero los confundía cuando estaban en línea con el texto
+//    (caso Provocar→Producir).
+// 4. Páginas con baja calidad — preferir transcripción parcial con
+//    [ilegible] que omitir bloques enteros (caso 2a2.09.18 que devolvió
+//    solo la nota al pie y comió toda la página).
+export const FULL_PAGE_EXTRACTION_PROMPT = `Sos un sistema de OCR forense de página completa. Tu tarea es transcribir TODO el texto visible en la imagen LITERALMENTE, sin corregir, sin reformular y sin omitir.
 
 ════════════════════════════════════════
 ORIENTACIÓN
 ════════════════════════════════════════
-La foto puede estar rotada 90°, 180° o 270°. Determiná la orientación correcta a partir de la forma de las letras y leé el texto como si la imagen estuviera derecha.
+La foto puede estar rotada 90°, 180° o 270° o ligeramente inclinada. Determiná la orientación correcta a partir de la forma de las letras y leé el texto como si la imagen estuviera derecha.
 
 ════════════════════════════════════════
-QUÉ TRANSCRIBIR
+QUÉ TRANSCRIBIR (cuerpo principal)
 ════════════════════════════════════════
-✓ Todo el texto impreso del cuerpo principal (párrafos, títulos, subtítulos, enumeraciones, citas, notas al pie).
+✓ Todos los párrafos, títulos, subtítulos, enumeraciones, citas, transcripciones de leyes/artículos.
 ✓ Respetá orden natural de lectura: arriba → abajo, izquierda → derecha en la orientación correcta.
 ✓ Conservá puntuación, acentos, mayúsculas y números tal cual aparecen.
-✓ Mantené saltos de línea de párrafos. Usá un salto de línea simple entre líneas de un mismo párrafo, doble salto entre párrafos distintos.
 
 ════════════════════════════════════════
-QUÉ IGNORAR
+TRANSCRIPCIÓN LITERAL (REGLA INNEGOCIABLE)
 ════════════════════════════════════════
-✗ Encabezados/pies de página repetidos en cada hoja (nombre del autor, título del libro, número de página suelto).
-✗ Notas manuscritas al margen (texto a mano con lápiz o birome).
-✗ Post-its o papelitos pegados al libro con texto manuscrito encima.
-✗ Dedos, manos, bordes de mesa, fondos de escritorio capturados en la foto.
-✗ Marcas de subrayado, círculos, flechas o llaves al margen — el texto debajo SÍ se transcribe, pero las marcas no.
+🚫 NO corrijas typos del original. Si el libro dice "males tratos", escribí "males tratos". Si dice "esten" sin tilde, dejalo sin tilde. NUNCA reemplaces una palabra por la que el modelo "cree que debería ir".
+🚫 NO completes palabras que se ven cortadas — escribilas hasta donde se lean y agregá [...] si quedó incompleta.
+🚫 NO reformules frases ni cambies el orden de las palabras.
+🚫 NO traduzcas, no resumas, no parafrasees.
+✓ Si una palabra es ambigua (dos letras posibles, p.ej. "rn" vs "m"), elegí la lectura más probable y seguí. NO corrijas según contexto semántico.
+
+════════════════════════════════════════
+NOTAS AL PIE Y SUPERÍNDICES (importante)
+════════════════════════════════════════
+✓ Cuando una palabra del cuerpo tenga un superíndice numérico de referencia a nota al pie (p. ej. "art. 183^183" o "fauna silvestre^976"), transcribilo INMEDIATAMENTE PEGADO a la palabra usando el formato palabra^N (acento circunflejo + número, sin espacio). Ejemplo: "el artículo 183^968 establece que".
+✓ Si la imagen muestra el pie de página con las notas correspondientes (líneas chicas abajo precedidas por números), transcribilas al final del texto principal precedidas por la línea "═══ Notas al pie ═══" y cada nota en formato "[N] texto de la nota". Ejemplo: "[968] SOZZO, ob. cit., p. 390.".
+✓ Si solo ves el superíndice en el cuerpo pero no la nota correspondiente (porque está recortada de la foto), igual conservá el ^N en el cuerpo.
+
+════════════════════════════════════════
+MANUSCRITOS Y ANOTACIONES A MANO
+════════════════════════════════════════
+✓ Si hay texto manuscrito (letra a mano con lápiz o birome) que parece relevante al contenido — por ejemplo, una aclaración entre paréntesis, una traducción al margen pegada a una palabra, una llave que apunta a un párrafo con texto al lado — TRANSCRIBILO encerrado en [m: ...]. Ejemplo: la imagen muestra "Azuzarlos para el trabajo" con corchete manuscrito abajo que dice "Provocar para que actúe con agresividad" → escribir "Azuzarlos para el trabajo [m: Provocar para que actúe con agresividad]".
+✓ Si el manuscrito es claramente decorativo o no aporta texto (flecha, círculo, asterisco, subrayado a mano sin palabras), omitilo silenciosamente.
+✓ Si dudás entre dos lecturas del manuscrito, escribí [m: ?lectura1 / lectura2].
+
+════════════════════════════════════════
+QUÉ IGNORAR (silenciosamente)
+════════════════════════════════════════
+✗ Encabezados de página repetidos en cada hoja (nombre del autor solo, título del libro repetido arriba). Sí transcribí títulos de capítulo o sección que sean parte del flujo del texto.
+✗ Número de página suelto al pie (sin texto alrededor).
+✗ Post-its de color con texto manuscrito que tape parte de la hoja: tratar como objeto opaco, NO transcribir el texto del post-it ni inventar lo que esté tapado debajo.
+✗ Dedos, manos, teclados de notebook, bordes de mesa, fondos de escritorio capturados en la foto.
+
+════════════════════════════════════════
+PÁGINAS CON BAJA CALIDAD / FUERA DE FOCO
+════════════════════════════════════════
+✓ Si una región está borrosa pero podés inferir las palabras con razonable certeza, transcribilas.
+✓ Si una región es ilegible (foco roto, sombra que tapa, resaltador sobreexpuesto), escribí [ilegible: ~N palabras] estimando cuántas palabras hay.
+🚫 NUNCA omitas un párrafo entero porque sea difícil de leer. Preferí transcribir lo que se ve y marcar lo ilegible que devolver una página vacía o solo la nota al pie. Si la página tiene 10 líneas de cuerpo y solo podés leer 3, escribí esas 3 + [ilegible: ~7 líneas].
 
 ════════════════════════════════════════
 FORMATO DE SALIDA
 ════════════════════════════════════════
-• Devolvé sólo el texto transcripto, sin comillas, sin markdown, sin viñetas.
-• No agregues "Aquí está el texto:", "Transcripción:", encabezados, explicaciones ni comentarios.
-• No reformules, traduzcas ni resumas. Si una palabra está cortada por el borde, transcribila hasta donde se lea.
+• Devolvé sólo el texto transcripto. Sin comillas envolventes, sin markdown, sin viñetas.
+• No agregues "Aquí está el texto:", "Transcripción:", encabezados, explicaciones ni comentarios meta.
+• Saltos de párrafo: doble salto de línea entre párrafos distintos. DENTRO de un mismo párrafo, uní las líneas con un espacio (NO mantengas el salto de línea físico del libro a media oración).
+• Las notas al pie (si las hay) van al final, después de "═══ Notas al pie ═══".
 • Si la imagen no contiene ningún texto legible, respondé exactamente: "Sin texto legible en la imagen."`;
 
 export const HIGHLIGHT_EXTRACTION_PROMPT = `Sos un sistema de OCR SELECTIVO por color. Tu única tarea es transcribir el texto que tiene encima una CAPA DE MARCADOR RESALTADOR y NADA MÁS.
