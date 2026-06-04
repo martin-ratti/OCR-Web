@@ -64,7 +64,12 @@ export class GeminiOcrAdapter implements OcrAdapter {
 // el caso de uso (texto resaltado o página completa) sin cuota
 // asfixiante. Endpoint OpenAI-compatible, no requiere SDK.
 const GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_TIMEOUT_MS = 60_000;
+// 45s (antes 60s): Llama 4 Scout responde una página normal en 3-12s. Cuando
+// pasa de ~45s casi siempre es la request colgada del lado de Groq, no trabajo
+// legítimo — y un timeout más corto evita que el cliente quede "cargando" hasta
+// 5 min acumulando reintentos de 60s. El cliente reintenta los timeouts pocas
+// veces (ver UpstreamBusy + MAX_GROQ_TIMEOUT_RETRIES en useOcrStore).
+const GROQ_TIMEOUT_MS = 45_000;
 
 export class GroqOcrAdapter implements OcrAdapter {
   private readonly apiKey: string;
@@ -127,7 +132,12 @@ export class GroqOcrAdapter implements OcrAdapter {
       return typeof text === 'string' ? text.trim() : '';
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
-        throw new Error(`Groq timeout after ${GROQ_TIMEOUT_MS}ms`);
+        // Lo etiquetamos como 504 para que el errorHandler lo mande como
+        // "UpstreamBusy" transitorio (no como 500 → error terminal). El cliente
+        // reintenta los busy/timeout pocas veces, no las 5 de un error genérico.
+        const timeoutErr = new Error(`Groq timeout after ${GROQ_TIMEOUT_MS}ms (504)`) as Error & { status?: number };
+        timeoutErr.status = 504;
+        throw timeoutErr;
       }
       throw err;
     } finally {
