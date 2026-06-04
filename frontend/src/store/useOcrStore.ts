@@ -72,6 +72,12 @@ const MAX_FILES = 200;
 const INTER_FILE_DELAY_MS = 5000;
 const INTER_FILE_DELAY_GROQ_MS = 2500;
 const MAX_ATTEMPTS = 5;
+// Tope de reintentos SOLO para saturación/timeout del modelo (UpstreamBusy /
+// 504). Un timeout que se repite no se arregla insistiendo: 2 reintentos cortos
+// y se reporta el error. Esto evita que Groq quede "cargando" varios minutos
+// acumulando timeouts de 45s (bug reportado). La cuota agotada (RateLimit) y los
+// errores genéricos siguen usando MAX_ATTEMPTS.
+const MAX_BUSY_ATTEMPTS = 3;
 const UNDO_TTL_MS = 12_000;
 
 let abortController: AbortController | null = null;
@@ -154,6 +160,13 @@ async function extractOneWithRetries(
         if (!body) throw new Error('Respuesta inválida del servidor');
         text = body.text;
       }
+      // Si se canceló entre que llegó la respuesta y este punto, no resucitamos
+      // el archivo a 'success': cancel() ya lo devolvió a 'idle'. El cache sí lo
+      // guardamos igual (el texto es válido y ahorra una llamada futura).
+      if (signal.aborted) {
+        setState((s) => ({ textCache: { ...s.textCache, [cacheKey(target.file)]: text } }));
+        return;
+      }
       setState((s) => ({
         files: s.files.map((f) =>
           f.id === fileId
@@ -181,7 +194,15 @@ async function extractOneWithRetries(
       // Local engine errors are deterministic (model load failure, OOM, image
       // decode error). Retrying with backoff would just stall the queue on
       // the same failure five times. Fail fast.
-      const canRetry = store.selectedEngine !== 'paddle' && attempt < MAX_ATTEMPTS;
+      //
+      // 429 (rate) y 5xx (busy) cortan antes (MAX_BUSY_ATTEMPTS). El 429 de Groq
+      // suele ser cuota DIARIA de tokens agotada ("try again in 22m"), no un
+      // burst de RPM: insistir 5 veces con backoff de 15·n s solo dejaba la UI
+      // "cargando" >2 min sin chance de éxito (bug reportado). 2 reintentos
+      // cortos cubren un burst momentáneo; si es cuota dura, falla rápido con
+      // mensaje claro. Solo los errores genéricos usan MAX_ATTEMPTS.
+      const attemptCap = isRate || isBusy ? MAX_BUSY_ATTEMPTS : MAX_ATTEMPTS;
+      const canRetry = store.selectedEngine !== 'paddle' && attempt < attemptCap;
 
       if (!canRetry) {
         setState((s) => ({
@@ -203,18 +224,21 @@ async function extractOneWithRetries(
         return;
       }
 
-      // Backoff diferenciado: cuota (15·n s) > saturación upstream (8·n s) > genérico (3·n s).
-      const waitSec = isRate ? attempt * 15 : isBusy ? attempt * 8 : attempt * 3;
+      // Backoff diferenciado: cuota/saturación (8·n s) > genérico (3·n s). Antes
+      // el rate usaba 15·n: con el cap viejo de 5 intentos sumaba 150s de espera
+      // pura. Con 8·n y 2 reintentos son ~24s máx antes de reportar el error.
+      const waitSec = isRate || isBusy ? attempt * 8 : attempt * 3;
+      const maxShown = attemptCap - 1;
       setState((s) => ({
         files: s.files.map((f) =>
           f.id === fileId
             ? {
                 ...f,
                 infoMessage: isRate
-                  ? `La IA está a mil. Esperando ${waitSec}s (intento ${attempt}/${MAX_ATTEMPTS - 1})...`
+                  ? `La IA está a mil. Esperando ${waitSec}s (intento ${attempt}/${maxShown})...`
                   : isBusy
-                    ? `Modelo saturado, reintentando en ${waitSec}s (intento ${attempt}/${MAX_ATTEMPTS - 1})...`
-                    : `Reintentando en ${waitSec}s (intento ${attempt}/${MAX_ATTEMPTS - 1})...`,
+                    ? `Modelo saturado, reintentando en ${waitSec}s (intento ${attempt}/${maxShown})...`
+                    : `Reintentando en ${waitSec}s (intento ${attempt}/${maxShown})...`,
               }
             : f,
         ),
@@ -387,16 +411,32 @@ export const useOcrStore = create<OcrState>()(
         cancelled = true;
         abortController?.abort();
         abortController = null;
-        set({ globalStatus: 'done' });
+        // Cualquier archivo que quedó en 'processing' al cancelar NO terminó:
+        // lo devolvemos a 'idle' para que no quede el spinner fantasma y para
+        // que vuelva a ser elegible en el próximo "¡DALAAAA!". Sin esto el
+        // badge "Procesando 1/N" seguía girando para siempre (bug reportado).
+        set((s) => ({
+          globalStatus: 'idle',
+          globalProgress: 0,
+          files: s.files.map((f) =>
+            f.status === 'processing'
+              ? { ...f, status: 'idle', infoMessage: undefined }
+              : f,
+          ),
+        }));
       },
 
       processOne: async (id) => {
-        abortController = new AbortController();
+        const ac = new AbortController();
+        abortController = ac;
         cancelled = false;
         set({ globalStatus: 'working' });
         const state = get();
-        await extractOneWithRetries(state, set, id, abortController.signal);
-        if (!cancelled) set({ globalStatus: 'done' });
+        await extractOneWithRetries(state, set, id, ac.signal);
+        // Solo marcamos 'done' si esta corrida no fue abortada/cancelada. Usamos
+        // el signal local (no el module-level) para no pisar el estado de una
+        // corrida posterior que ya tomó el abortController.
+        if (!ac.signal.aborted && !cancelled) set({ globalStatus: 'done' });
       },
 
       forceRetry: async (id) => {
@@ -483,13 +523,17 @@ export const useOcrStore = create<OcrState>()(
           }
         }
 
-        set({ globalStatus: 'done' });
+        // Si se canceló, cancel() ya dejó globalStatus en 'idle' y limpió los
+        // 'processing'. No lo pisamos con 'done' (eso reactivaba el spinner).
+        if (!cancelled && !signal.aborted) set({ globalStatus: 'done' });
       },
 
       retryAllErrors: async () => {
         const errored = get().files.filter((f) => f.status === 'error');
         if (errored.length === 0) return;
-        await get().processAll();
+        // Reprocesar SOLO los que están en error, no los 'idle' sin tocar.
+        // Antes esto llamaba a processAll() que barría idle+error juntos.
+        await get().processSelected(errored.map((f) => f.id));
       },
 
       reorderFile: (fromId, toId) =>
@@ -592,7 +636,8 @@ export const useOcrStore = create<OcrState>()(
           }
         }
 
-        set({ globalStatus: 'done' });
+        // Mismo guard que processAll: no pisar el 'idle' que dejó cancel().
+        if (!cancelled && !signal.aborted) set({ globalStatus: 'done' });
       },
     }),
     {
