@@ -69,8 +69,12 @@ const MAX_FILES = 200;
 // Gemini free = 15 RPM → 4s. Usamos 5s con margen para clock drift y latencia variable.
 // Groq free = 30 RPM → 2s. Usamos 2.5s con el mismo razonamiento.
 // Paddle/Tesseract local = 0 (no cuota).
-const INTER_FILE_DELAY_MS = 5000;
-const INTER_FILE_DELAY_GROQ_MS = 2500;
+// 6s (antes 5s): Gemini flash free tier es ~10 RPM. A 5s eventualmente chocaba
+// con el límite por minuto y disparaba 429s en lotes largos. 6s da margen.
+const INTER_FILE_DELAY_MS = 6000;
+// 2s (antes 2.5s): Groq free tier es 30 RPM → 2s por request es seguro y
+// procesamos un 20% más de imágenes por minuto.
+const INTER_FILE_DELAY_GROQ_MS = 2000;
 const MAX_ATTEMPTS = 5;
 // Tope de reintentos SOLO para saturación/timeout del modelo (UpstreamBusy /
 // 504). Un timeout que se repite no se arregla insistiendo: 2 reintentos cortos

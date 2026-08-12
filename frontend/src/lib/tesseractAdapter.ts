@@ -283,22 +283,97 @@ function rotateImageData270CW(src: ImageData): ImageData {
   return out;
 }
 
-/**
- * Decode a File/Blob, respect EXIF orientation, downscale to MAX_INPUT_WIDTH,
- * and convert to a contrast-normalised grayscale ImageData.
- *
- * Two deliberate choices for highlighter-heavy book photos:
- *   - Channel weighting leans on green+blue, not the BT.601 luma. Warm
- *     highlighters (orange/yellow/pink, the most common in the user's notes)
- *     are bright in red, so a red-weighted luma washes the black ink under the
- *     marker into mid-grey and tanks recall on exactly the words the user cared
- *     enough to highlight. Green/blue keep that ink dark.
- *   - A gentle percentile contrast stretch (not Otsu binarisation) pulls the
- *     paper toward white and the ink toward black without collapsing faded
- *     strokes. Global Otsu here was a 5-10% accuracy hit in earlier benchmarks,
- *     so we stay in grayscale and just widen the histogram.
- */
-async function fileToGrayImageData(blob: Blob): Promise<ImageData> {
+function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return [0, 0, l];
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h = 0;
+  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+  else if (max === g) h = ((b - r) / d + 2) / 6;
+  else h = ((r - g) / d + 4) / 6;
+  return [h * 360, s * 100, l * 100];
+}
+
+function isHighlighterPixel(r: number, g: number, b: number): boolean {
+  const [h, s, l] = rgbToHsl(r, g, b);
+
+  if (l < 20 || l > 96) return false;
+  if (s < 10) return false;
+  if (s < 20 && l > 78 && (h >= 30 && h <= 55)) return false;
+
+  // Rosa / Fucsia / Magenta
+  if ((h >= 275 || h <= 25) && s >= 12 && l >= 30 && l <= 93) return true;
+  // Amarillo
+  if (h >= 35 && h <= 75 && s >= 18 && l >= 45 && l <= 93) return true;
+  // Naranja
+  if (h >= 15 && h <= 40 && s >= 18 && l >= 45 && l <= 90) return true;
+  // Verde
+  if (h >= 75 && h <= 165 && s >= 12 && l >= 35 && l <= 90) return true;
+  // Celeste / Azul
+  if (h >= 165 && h <= 240 && s >= 12 && l >= 35 && l <= 90) return true;
+  // Violeta / Púrpura
+  if (h >= 240 && h <= 275 && s >= 12 && l >= 35 && l <= 90) return true;
+
+  return false;
+}
+
+interface OcrLine {
+  text: string;
+  bbox: { x0: number; y0: number; x1: number; y1: number };
+}
+
+function collectLines(blocks: unknown): OcrLine[] {
+  const lines: OcrLine[] = [];
+  if (!Array.isArray(blocks)) return lines;
+  for (const block of blocks as Array<{ paragraphs?: unknown }>) {
+    const paragraphs = Array.isArray(block?.paragraphs) ? block.paragraphs : [];
+    for (const para of paragraphs as Array<{ lines?: unknown }>) {
+      const ls = Array.isArray(para?.lines) ? para.lines : [];
+      for (const line of ls as Array<{ text?: string; bbox?: { x0: number; y0: number; x1: number; y1: number } }>) {
+        if (typeof line?.text === 'string' && line.text.trim().length > 0 && line.bbox) {
+          lines.push({ text: line.text.trim(), bbox: line.bbox });
+        }
+      }
+    }
+  }
+  return lines;
+}
+
+function isBboxHighlighted(
+  colorData: ImageData,
+  bbox: { x0: number; y0: number; x1: number; y1: number },
+  upscale: number
+): boolean {
+  const w = colorData.width;
+  const h = colorData.height;
+  const px = colorData.data;
+
+  const minX = Math.max(0, Math.floor(bbox.x0 / upscale));
+  const maxX = Math.min(w - 1, Math.ceil(bbox.x1 / upscale));
+  const minY = Math.max(0, Math.floor(bbox.y0 / upscale));
+  const maxY = Math.min(h - 1, Math.ceil(bbox.y1 / upscale));
+
+  const totalPixels = (maxX - minX + 1) * (maxY - minY + 1);
+  if (totalPixels <= 0) return false;
+
+  let highlightCount = 0;
+  for (let y = minY; y <= maxY; y++) {
+    const rowOffset = y * w * 4;
+    for (let x = minX; x <= maxX; x++) {
+      const idx = rowOffset + x * 4;
+      if (isHighlighterPixel(px[idx], px[idx + 1], px[idx + 2])) {
+        highlightCount++;
+      }
+    }
+  }
+
+  return (highlightCount / totalPixels) >= 0.04 || highlightCount >= 10;
+}
+
+async function fileToImageData(blob: Blob): Promise<{ colorData: ImageData; grayData: ImageData }> {
   const bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' });
   const srcW = bitmap.width;
   const srcH = bitmap.height;
@@ -314,24 +389,22 @@ async function fileToGrayImageData(blob: Blob): Promise<ImageData> {
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(bitmap, 0, 0, w, h);
   bitmap.close();
-  const data = ctx.getImageData(0, 0, w, h);
-  const px = data.data;
+
+  const colorData = ctx.getImageData(0, 0, w, h);
+  const grayData = ctx.getImageData(0, 0, w, h);
+
+  const px = colorData.data;
+  const gpx = grayData.data;
   const n = w * h;
 
-  // Pass 1: highlighter-aware grayscale + histogram for the stretch.
   const gray = new Uint8ClampedArray(n);
   const hist = new Uint32Array(256);
   for (let i = 0, p = 0; i < px.length; i += 4, p++) {
-    // 0.15·R + 0.5·G + 0.35·B: down-weights red so warm highlighter fill does
-    // not brighten the ink beneath it.
     const g = (0.15 * px[i] + 0.5 * px[i + 1] + 0.35 * px[i + 2]) | 0;
     gray[p] = g;
     hist[g]++;
   }
 
-  // Pass 2: find 2nd/98th percentile bounds and stretch to [0, 255]. Clipping
-  // the tails keeps a few dark specks or a glossy highlight from anchoring the
-  // range and flattening the rest.
   const clip = Math.max(1, Math.floor(n * 0.02));
   let lo = 0;
   let hiBound = 255;
@@ -351,11 +424,11 @@ async function fileToGrayImageData(blob: Blob): Promise<ImageData> {
     let v = ((gray[p] - lo) / range) * 255;
     v = v < 0 ? 0 : v > 255 ? 255 : v;
     const g = v | 0;
-    px[i] = g;
-    px[i + 1] = g;
-    px[i + 2] = g;
+    gpx[i] = g;
+    gpx[i + 1] = g;
+    gpx[i + 2] = g;
   }
-  return data;
+  return { colorData, grayData };
 }
 
 async function imageDataToBlob(imageData: ImageData, upscale: number): Promise<Blob> {
@@ -384,15 +457,7 @@ async function imageDataToBlob(imageData: ImageData, upscale: number): Promise<B
   return blob;
 }
 
-// Si la primera pasada (0°, la orientación nativa de la foto) ya supera este
-// umbral combinado, la imagen está derecha y NO probamos rotaciones: ahorra 3
-// pasadas de OCR (~3-6 s) en el caso común. Las fotos de WhatsApp del usuario
-// vienen derechas, así que este early-exit es el camino feliz.
 const UPRIGHT_CONFIDENCE_SHORTCUT = 0.55;
-// Margen mínimo que una rotación debe superar a 0° para que la creamos. Sin
-// esto, ruido marginal podía "ganarle" a la orientación correcta por centésimas
-// (el bug original con GOOD_ENOUGH_SPANISHNESS=0.035). Preferimos la foto tal
-// como vino salvo evidencia fuerte de que está rotada.
 const ROTATION_WIN_MARGIN = 0.08;
 
 type RotationFn = (src: ImageData) => ImageData;
@@ -403,20 +468,26 @@ const ROTATIONS: ReadonlyArray<{ label: string; fn: RotationFn | null }> = [
   { label: '270', fn: rotateImageData270CW },
 ];
 
+interface RotationResult {
+  quality: RotationQuality;
+  lines: OcrLine[];
+  rotationFn: RotationFn | null;
+}
+
 async function recognizeRotation(
   worker: Worker,
   base: ImageData,
   rot: RotationFn | null,
-): Promise<RotationQuality> {
+): Promise<RotationResult> {
   const data = rot ? rot(base) : base;
   const blob = await imageDataToBlob(data, UPSCALE_FACTOR);
   const url = URL.createObjectURL(blob);
   try {
-    // `blocks: true` expone confidence por palabra; sin esto solo tendríamos el
-    // string plano y volveríamos a depender de los trigramas.
     const { data: ocr } = await worker.recognize(url, {}, { text: true, blocks: true });
     const words = collectWords((ocr as { blocks?: unknown }).blocks);
-    return computeRotationQuality(ocr.text, words);
+    const lines = collectLines((ocr as { blocks?: unknown }).blocks);
+    const quality = computeRotationQuality(ocr.text, words);
+    return { quality, lines, rotationFn: rot };
   } finally {
     URL.revokeObjectURL(url);
   }
@@ -424,41 +495,25 @@ async function recognizeRotation(
 
 /**
  * Run the local OCR pipeline on a single File.
- * 1. Decode + downscale + grayscale.
- * 2. OCR the photo as-is (0°). If it reads with high confidence, commit — the
- *    common case (WhatsApp photos arrive upright) costs a single pass.
- * 3. Otherwise try the other 3 cardinal rotations and keep the orientation with
- *    the best *combined* quality (mean Tesseract confidence + readable-word
- *    ratio + Spanish trigrams), but only switch away from 0° if a rotation
- *    beats it by ROTATION_WIN_MARGIN. This is the fix for the "local engine
- *    returns garbage" bug: the old code picked by trigram density alone, so a
- *    rotated noisy pass could win over the correct upright one.
- * 4. Strip per-line garbage and join.
- *
- * Edge cases:
- *   - A genuinely non-Spanish or equation-heavy page still returns whatever
- *     Tesseract read at its best orientation. Returning a sentinel here would
- *     hide real OCR output from English/math pages — both legitimate for a
- *     law-textbook reader.
+ * 1. Decode + downscale + color/grayscale separation.
+ * 2. OCR the photo as-is (0°). If it reads with high confidence, commit.
+ * 3. Otherwise try the other 3 cardinal rotations.
+ * 4. Filter OCR bounding boxes against the color image to keep only highlighted text.
  */
 export async function recognizeLocal(file: File): Promise<string> {
-  const gray = await fileToGrayImageData(file);
+  const { colorData, grayData } = await fileToImageData(file);
   const worker = await getWorker();
   lastUsedAt = Date.now();
 
-  // First pass at the photo's native orientation.
-  const upright = await recognizeRotation(worker, gray, null);
+  const upright = await recognizeRotation(worker, grayData, null);
   let best = upright;
 
-  // Only spend time on rotations if the upright pass looks dubious.
-  if (upright.combined < UPRIGHT_CONFIDENCE_SHORTCUT) {
-    // A rotation is only trusted if it beats the upright pass by a clear margin;
-    // otherwise we keep the photo as it came (avoids the old false-rotation bug).
-    const threshold = upright.combined + ROTATION_WIN_MARGIN;
+  if (upright.quality.combined < UPRIGHT_CONFIDENCE_SHORTCUT) {
+    const threshold = upright.quality.combined + ROTATION_WIN_MARGIN;
     for (const { fn } of ROTATIONS) {
-      if (fn === null) continue; // 0° already done.
-      const r = await recognizeRotation(worker, gray, fn);
-      if (r.combined >= threshold && r.combined > best.combined) {
+      if (fn === null) continue;
+      const r = await recognizeRotation(worker, grayData, fn);
+      if (r.quality.combined >= threshold && r.quality.combined > best.quality.combined) {
         best = r;
       }
     }
@@ -467,11 +522,24 @@ export async function recognizeLocal(file: File): Promise<string> {
   lastUsedAt = Date.now();
   scheduleIdleTermination();
 
-  const cleaned = best.text
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0)
+  const rotColorData = best.rotationFn ? best.rotationFn(colorData) : colorData;
+
+  const highlightedLines = best.lines.filter((line) =>
+    isBboxHighlighted(rotColorData, line.bbox, UPSCALE_FACTOR)
+  );
+
+  if (highlightedLines.length === 0) {
+    return 'No se detectó texto resaltado en esta imagen.';
+  }
+
+  const cleaned = highlightedLines
+    .map((l) => l.text)
+    .filter((t) => t.length > 0)
     .filter(isReadableLine);
+
+  if (cleaned.length === 0) {
+    return 'No se detectó texto resaltado en esta imagen.';
+  }
 
   return cleaned.join('\n').trim();
 }

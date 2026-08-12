@@ -5,7 +5,10 @@ import { logger } from '../../config/logger';
 import type { OcrEngine } from '@ocr-web/shared';
 import { HttpError } from '../../middlewares/errorHandler';
 
-const MODEL_ID = 'gemini-2.5-flash-lite';
+// flash (no lite): la visión de flash-lite es demasiado débil para distinguir
+// resaltadores pastel del fondo del papel. flash tiene free tier generoso
+// (~500 RPD, 10 RPM) y mucho mejor capacidad de análisis cromático.
+const MODEL_ID = 'gemini-2.5-flash';
 // 90s (antes 60s): muestras reales en samples del usuario tardan hasta 50s
 // para páginas densas con muchas regiones resaltadas. 60s dejaba poca cabeza
 // y disparaba timeouts antes de que la API terminara legitimamente.
@@ -103,9 +106,13 @@ export class GroqOcrAdapter implements OcrAdapter {
           max_tokens: 4096,
           messages: [
             {
+              role: 'system',
+              content: HIGHLIGHT_EXTRACTION_PROMPT,
+            },
+            {
               role: 'user',
               content: [
-                { type: 'text', text: FULL_PAGE_EXTRACTION_PROMPT },
+                { type: 'text', text: 'Transcribí única y literalmente el texto que está resaltado con marcador de color (rosa, amarillo, verde, etc.) en esta imagen.' },
                 { type: 'image_url', image_url: { url: dataUrl } },
               ],
             },
