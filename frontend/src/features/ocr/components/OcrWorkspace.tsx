@@ -14,13 +14,10 @@ import { Progress } from '@/components/ui/progress';
 import pandaImg from '../../../assets/panda.png';
 import monkeyImg from '../../../assets/monkey.png';
 import { subscribeTesseractProgress, type TesseractProgress } from '../../../lib/tesseractAdapter';
+import { cleanOcrText } from '../../../lib/textFormatters';
 
 const MIN_FONT = 12;
 const MAX_FONT = 28;
-
-function cleanParagraphs(input: string): string {
-  return input.replace(/(?<!\n)\n(?!\n)/g, ' ');
-}
 
 export function OcrWorkspace() {
   const files = useOcrStore(ocrSelectors.files);
@@ -76,8 +73,8 @@ export function OcrWorkspace() {
 
   const handleCleanFormat = () => {
     if (!activeFile?.resultText) return;
-    updateFileResult(activeFile.id, cleanParagraphs(activeFile.resultText));
-    toast.success('Párrafos ordenados');
+    updateFileResult(activeFile.id, cleanOcrText(activeFile.resultText));
+    toast.success('Párrafos y guiones ordenados');
   };
 
   const handleCopy = async (): Promise<boolean> => {
@@ -191,6 +188,14 @@ export function OcrWorkspace() {
         return;
       }
 
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        if (!working && counts.pending + counts.error > 0) {
+          e.preventDefault();
+          void processAll();
+        }
+        return;
+      }
+
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
         if (canEditorAct) {
           e.preventDefault();
@@ -221,7 +226,17 @@ export function OcrWorkspace() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [working, canEditorAct, files, activeFileId, cancel, setActiveFile]);
+  }, [
+    working,
+    canEditorAct,
+    files,
+    activeFileId,
+    cancel,
+    setActiveFile,
+    counts.error,
+    counts.pending,
+    processAll,
+  ]);
 
   const onDragOver = (e: React.DragEvent) => {
     // Firefox during dragOver expone `types` pero `items` puede estar vacío por

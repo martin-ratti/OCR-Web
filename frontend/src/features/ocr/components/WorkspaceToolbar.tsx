@@ -97,22 +97,36 @@ export function WorkspaceToolbar({
           </Select>
 
           {working ? (
-            <button
-              onClick={onCancel}
-              className="btn-bounce inline-flex items-center gap-1.5 bg-rose-400 text-white h-9 px-4 rounded-full text-xs font-extrabold hover:bg-rose-500 shadow-md shadow-rose-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 focus-visible:ring-offset-2"
-            >
-              <XCircle className="w-4 h-4" aria-hidden />
-              Cancelar (Esc)
-            </button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={onCancel}
+                  aria-label="Cancelar procesamiento de la cola (Esc)"
+                  className="btn-bounce inline-flex items-center gap-1.5 bg-rose-400 text-white h-9 px-4 rounded-full text-xs font-extrabold hover:bg-rose-500 shadow-md shadow-rose-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 focus-visible:ring-offset-2"
+                >
+                  <XCircle className="w-4 h-4" aria-hidden />
+                  Cancelar (Esc)
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>Detener el proceso actual (Esc)</TooltipContent>
+            </Tooltip>
           ) : (
-            <button
-              onClick={onProcessAll}
-              disabled={pendingPlusErrorCount === 0}
-              className="btn-bounce inline-flex items-center gap-1.5 bg-pink-400 text-white h-9 px-4 rounded-full text-xs font-extrabold hover:bg-pink-500 shadow-md shadow-pink-200 disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-300 focus-visible:ring-offset-2"
-            >
-              <HeartPulse className="w-4 h-4 motion-safe:animate-pulse" aria-hidden />
-              ¡DALAAAA! <Sparkles className="w-3.5 h-3.5" aria-hidden />
-            </button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={onProcessAll}
+                  disabled={pendingPlusErrorCount === 0}
+                  aria-label="Procesar cola (Ctrl + Enter)"
+                  className="btn-bounce inline-flex items-center gap-1.5 bg-pink-400 text-white h-9 px-4 rounded-full text-xs font-extrabold hover:bg-pink-500 shadow-md shadow-pink-200 disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-300 focus-visible:ring-offset-2"
+                >
+                  <HeartPulse className="w-4 h-4 motion-safe:animate-pulse" aria-hidden />
+                  ¡DALAAAA! <Sparkles className="w-3.5 h-3.5" aria-hidden />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {pendingPlusErrorCount > 0 ? 'Procesar imágenes pendientes (Ctrl + Enter)' : 'Cola al día'}
+              </TooltipContent>
+            </Tooltip>
           )}
         </div>
 
