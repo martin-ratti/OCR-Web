@@ -528,17 +528,16 @@ export async function recognizeLocal(file: File): Promise<string> {
     isBboxHighlighted(rotColorData, line.bbox, UPSCALE_FACTOR)
   );
 
-  if (highlightedLines.length === 0) {
-    return 'No se detectó texto resaltado en esta imagen.';
-  }
+  // Si hay líneas resaltadas las priorizamos; si no se detectó marcador, se transcribe la página completa
+  const linesToUse = highlightedLines.length > 0 ? highlightedLines : best.lines;
 
-  const cleaned = highlightedLines
+  const cleaned = linesToUse
     .map((l) => l.text)
     .filter((t) => t.length > 0)
     .filter(isReadableLine);
 
   if (cleaned.length === 0) {
-    return 'No se detectó texto resaltado en esta imagen.';
+    return 'Sin texto legible en la imagen.';
   }
 
   return cleaned.join('\n').trim();

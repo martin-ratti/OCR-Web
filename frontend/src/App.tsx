@@ -81,7 +81,7 @@ export default function App() {
         </main>
 
         <footer
-          className={`w-full text-center text-xs font-bold text-pink-300 flex items-center justify-center gap-1 ${
+          className={`w-full text-center text-xs font-bold text-pink-500/80 flex items-center justify-center gap-1 ${
             hasFiles ? 'py-1.5' : 'py-4'
           }`}
         >

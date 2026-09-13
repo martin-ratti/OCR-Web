@@ -87,8 +87,8 @@ const UNDO_TTL_MS = 12_000;
 let abortController: AbortController | null = null;
 let cancelled = false;
 
-function cacheKey(f: File): string {
-  return `${f.name}::${f.size}`;
+function cacheKey(f: File, engine: OcrEngine = 'gemini'): string {
+  return `${engine}::${f.name}::${f.size}`;
 }
 
 async function ensureCompressed(state: OcrState, fileId: string): Promise<File> {
@@ -168,7 +168,9 @@ async function extractOneWithRetries(
       // el archivo a 'success': cancel() ya lo devolvió a 'idle'. El cache sí lo
       // guardamos igual (el texto es válido y ahorra una llamada futura).
       if (signal.aborted) {
-        setState((s) => ({ textCache: { ...s.textCache, [cacheKey(target.file)]: text } }));
+        setState((s) => ({
+          textCache: { ...s.textCache, [cacheKey(target.file, s.selectedEngine)]: text },
+        }));
         return;
       }
       setState((s) => ({
@@ -183,7 +185,7 @@ async function extractOneWithRetries(
               }
             : f,
         ),
-        textCache: { ...s.textCache, [cacheKey(target.file)]: text },
+        textCache: { ...s.textCache, [cacheKey(target.file, s.selectedEngine)]: text },
       }));
       return;
     } catch (err: unknown) {
@@ -307,7 +309,9 @@ export const useOcrStore = create<OcrState>()(
         if (accepted.length > 0) {
           set((s) => {
             const ocrFiles: OcrFile[] = accepted.map((f) => {
-              const cached = s.textCache[cacheKey(f)];
+              const cached =
+                s.textCache[cacheKey(f, s.selectedEngine)] ??
+                s.textCache[`${f.name}::${f.size}`];
               return {
                 id: crypto.randomUUID(),
                 file: f,
@@ -403,7 +407,7 @@ export const useOcrStore = create<OcrState>()(
         set((state) => {
           const target = state.files.find((f) => f.id === id);
           const newCache = target
-            ? { ...state.textCache, [cacheKey(target.file)]: text }
+            ? { ...state.textCache, [cacheKey(target.file, state.selectedEngine)]: text }
             : state.textCache;
           return {
             files: state.files.map((f) => (f.id === id ? { ...f, resultText: text } : f)),
@@ -447,9 +451,11 @@ export const useOcrStore = create<OcrState>()(
         const target = get().files.find((f) => f.id === id);
         if (!target) return;
         set((s) => {
-          const key = cacheKey(target.file);
+          const keyWithEngine = cacheKey(target.file, s.selectedEngine);
+          const legacyKey = `${target.file.name}::${target.file.size}`;
           const nextCache = { ...s.textCache };
-          delete nextCache[key];
+          delete nextCache[keyWithEngine];
+          delete nextCache[legacyKey];
           return {
             textCache: nextCache,
             files: s.files.map((f) =>

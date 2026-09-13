@@ -78,19 +78,19 @@ export function WorkspaceToolbar({
               <SelectItem value="gemini" className="font-bold">
                 <span className="flex items-center gap-2">
                   <Sparkles className="w-4 h-4 text-pink-500" aria-hidden />
-                  IA (Gemini) — Alta precisión
+                  IA (Gemini) — Solo texto resaltado
                 </span>
               </SelectItem>
               <SelectItem value="groq" className="font-bold">
                 <span className="flex items-center gap-2">
                   <Sparkles className="w-4 h-4 text-amber-500" aria-hidden />
-                  IA (Groq Llama) — Mil/día
+                  IA (Groq Llama) — Página completa (1000/día)
                 </span>
               </SelectItem>
               <SelectItem value="paddle" className="font-bold">
                 <span className="flex items-center gap-2">
                   <Cpu className="w-4 h-4 text-indigo-500" aria-hidden />
-                  Local (en tu navegador) — Sin cuota
+                  Local (en tu navegador) — Sin cuota / Offline
                 </span>
               </SelectItem>
             </SelectContent>
