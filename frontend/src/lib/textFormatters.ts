@@ -12,7 +12,7 @@ const HYPHEN_PATTERN = '[-\\u00AD\\u2010\\u2011\\u2013\\u2014]';
 const HYPHEN_REGEX = new RegExp(`(\\p{L}+)${HYPHEN_PATTERN}\\s*\\r?\\n\\s*(\\p{L}+)`, 'gu');
 
 // Detecta si una línea empieza con viñeta, numeración o encabezado que NO debe fusionarse con la línea anterior
-const LIST_OR_BREAK_START = /^\s*(?:(?:[•*]|\d+[\.\)]|[a-zA-Z][\.\)])\s+|[—–-]\s+|={3,}|Art(?:\.|ículo)\s+\d+|\[\d+\])/;
+const LIST_OR_BREAK_START = /^\s*(?:(?:[•*]|\d+[.)]|[a-zA-Z][.)])\s+|[—–-]\s+|={3,}|Art(?:\.|ículo)\s+\d+|\[\d+\])/;
 
 export function cleanOcrText(text: string): string {
   if (!text) return '';
