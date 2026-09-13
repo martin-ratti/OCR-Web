@@ -23,9 +23,10 @@ class StubAdapter implements OcrAdapter {
   }
 }
 
-function appWith(adapter: OcrAdapter, opts?: { withPaddle?: boolean }) {
+function appWith(adapter: OcrAdapter, opts?: { withPaddle?: boolean; withGroq?: boolean }) {
   const overrides: Partial<Record<'gemini' | 'paddle' | 'groq', OcrAdapter>> = { gemini: adapter };
   if (opts?.withPaddle) overrides.paddle = adapter;
+  if (opts?.withGroq) overrides.groq = adapter;
   const service = new OcrService(overrides);
   const controller = new OcrController(service);
   return createApp({ ocrController: controller, enableGlobalLimiter: false });
@@ -70,19 +71,38 @@ describe('POST /api/ocr/extract', () => {
     expect(res.status).toBe(200);
   });
 
-  it('rejects invalid engine string', async () => {
+  it('processes OCR successfully using engine=groq', async () => {
+    const res = await request(appWith(new StubAdapter('ok'), { withGroq: true }))
+      .post('/api/ocr/extract')
+      .attach('image', PNG_FIXTURE, { filename: 'a.png', contentType: 'image/png' })
+      .field('engine', 'groq');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'success', text: 'TEXTO RESALTADO' });
+  });
+
+  it('rejects invalid engine string with updated error message', async () => {
     const res = await request(appWith(new StubAdapter('ok')))
       .post('/api/ocr/extract')
       .attach('image', PNG_FIXTURE, { filename: 'a.png', contentType: 'image/png' })
       .field('engine', 'tesseract');
     expect(res.status).toBe(400);
     expect(res.body.status).toBe('error');
+    expect(res.body.warnings[0]).toContain('"gemini" o "groq"');
   });
 
   it('returns 400 when no file uploaded', async () => {
     const res = await request(appWith(new StubAdapter('ok')))
       .post('/api/ocr/extract');
     expect(res.status).toBe(400);
+  });
+
+  it('rejects file with invalid magic bytes (fake image)', async () => {
+    const fakeBuffer = Buffer.from('NOT_AN_IMAGE_FILE_CONTENT_JUST_TEXT', 'utf-8');
+    const res = await request(appWith(new StubAdapter('ok')))
+      .post('/api/ocr/extract')
+      .attach('image', fakeBuffer, { filename: 'fake.png', contentType: 'image/png' });
+    expect(res.status).toBe(400);
+    expect(res.body.warnings[0]).toMatch(/no es una imagen válida/i);
   });
 
   it('maps upstream rate-limit to 429 with sanitized message', async () => {

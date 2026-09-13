@@ -4,6 +4,7 @@ import { ExtractRequestSchema, type ExtractResponse, type OcrEngine } from '@ocr
 import { HttpError } from '../../middlewares/errorHandler';
 import { withRequestId } from '../../config/logger';
 import { recordOcrError, recordOcrSuccess } from '../../middlewares/metrics';
+import { hasValidImageMagicBytes } from '../../middlewares/upload';
 
 function isRateLimited(err: unknown): boolean {
   const m = (err as { message?: string })?.message ?? '';
@@ -22,12 +23,16 @@ export class OcrController {
         throw new HttpError(400, "No se subió ninguna imagen. Enviá Form-Data con el campo 'image'.");
       }
 
+      if (!hasValidImageMagicBytes(req.file.buffer)) {
+        throw new HttpError(400, 'El archivo subido no es una imagen válida o está dañado.');
+      }
+
       const rawEngine = typeof req.body?.engine === 'string'
         ? req.body.engine.trim().toLowerCase()
         : undefined;
       const parsed = ExtractRequestSchema.safeParse({ engine: rawEngine });
       if (!parsed.success) {
-        throw new HttpError(400, 'Engine inválido. Usá "gemini" o "paddle".');
+        throw new HttpError(400, 'Engine inválido. Usá "gemini" o "groq".');
       }
       const engine: OcrEngine = parsed.data.engine ?? 'gemini';
 

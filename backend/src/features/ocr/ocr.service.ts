@@ -107,12 +107,12 @@ export class GroqOcrAdapter implements OcrAdapter {
           messages: [
             {
               role: 'system',
-              content: HIGHLIGHT_EXTRACTION_PROMPT,
+              content: FULL_PAGE_EXTRACTION_PROMPT,
             },
             {
               role: 'user',
               content: [
-                { type: 'text', text: 'Transcribí única y literalmente el texto que está resaltado con marcador de color (rosa, amarillo, verde, etc.) en esta imagen.' },
+                { type: 'text', text: 'Transcribí todo el texto visible en esta imagen siguiendo las instrucciones del sistema forense.' },
                 { type: 'image_url', image_url: { url: dataUrl } },
               ],
             },
