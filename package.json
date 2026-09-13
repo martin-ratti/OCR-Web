@@ -5,7 +5,8 @@
   "scripts": {
     "build:shared": "pnpm --filter @ocr-web/shared build",
     "dev": "pnpm build:shared && concurrently \"pnpm --filter backend dev\" \"pnpm --filter frontend dev\"",
-    "build": "pnpm build:shared && pnpm --filter backend build && pnpm --filter frontend build"
+    "build": "pnpm build:shared && pnpm --filter backend build && pnpm --filter frontend build",
+    "test": "pnpm build:shared && pnpm --filter backend test && pnpm --filter frontend test"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"
