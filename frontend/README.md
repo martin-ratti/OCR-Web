@@ -1,73 +1,60 @@
-# React + TypeScript + Vite
+# ⚛️ Frontend — OCR Web
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Aplicación web SPA desarrollada con React 19, TypeScript y Vite, siguiendo principios de Clean Architecture y Feature-Sliced Design simplificado.
 
-Currently, two official plugins are available:
+## 🛠️ Stack Tecnológico
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **Framework:** React 19 + TypeScript
+- **Bundler:** Vite 8 + Rolldown
+- **Estilos:** Tailwind CSS + Shadcn/ui + Radix UI
+- **Estado Global:** Zustand con persistencia en `localStorage`
+- **OCR Offline:** Tesseract.js (WASM, `spa` + `eng`, `PSM.AUTO`)
+- **Modo Oscuro:** `next-themes` con toggle accesible (`ThemeToggle`)
+- **Testing:** Vitest (`useOcrStore.test.ts`, `textFormatters.test.ts`)
+- **Exportación:** `docx` (.docx formateado) y `jszip` (.zip de archivos .txt)
 
-## React Compiler
+## 📂 Estructura
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```text
+frontend/src/
+ ┣ components/              # Componentes compartidos (Headers, ThemeToggle, ErrorBoundary)
+ ┃ ┗ ui/                    # Primitivas Shadcn/Radix (Button, Dialog, Select, Tooltip, etc.)
+ ┣ features/ocr/            # Módulo principal OCR
+ ┃ ┗ components/            # Workspace, Dropzone, Editor, Viewer, Toolbars
+ ┣ lib/                     # Utilidades ópticas, formateadores y exportadores
+ ┃ ┣ addFilesFeedback.ts    # Toasts y métricas de carga
+ ┃ ┣ exporters.ts           # Generador DOCX y ZIP
+ ┃ ┣ imageDownscale.ts      # Reducción previa en canvas (1600px máx)
+ ┃ ┣ tesseractAdapter.ts    # Motor local en Web Worker
+ ┃ ┣ textFormatters.ts      # Reconstrucción silábica y limpieza forense
+ ┃ ┗ utils.ts               # cn() para Tailwind
+ ┣ shared/                  # Capa de red tipada (`api.ts`)
+ ┗ store/                   # Store Zustand (`useOcrStore.ts`)
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## 🚀 Scripts Disponibles
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+```bash
+# Iniciar servidor de desarrollo (http://localhost:5173)
+pnpm dev
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+# Compilar para producción (TypeScript + Vite)
+pnpm build
+
+# Ejecutar suite de pruebas unitarias
+pnpm test
+
+# Ejecutar linter
+pnpm lint
+
+# Vista previa de la compilación de producción
+pnpm preview
 ```
+
+## ⌨️ Atajos de Teclado
+
+- `Ctrl + Enter` / `Cmd + Enter`: Iniciar procesamiento de toda la cola ("¡DALAAAA!").
+- `Esc`: Cancelar el procesamiento en curso o cerrar modales.
+- `Ctrl + F` / `Cmd + F`: Abrir buscador y reemplazo en el editor de texto extraído.
+- `Ctrl + S` / `Cmd + S`: Descargar el apunte activo en `.txt`.
+- `Flecha Arriba` / `Flecha Abajo`: Navegar entre archivos de la cola.

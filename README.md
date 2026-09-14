@@ -29,8 +29,8 @@
 La app ofrece **tres motores de OCR seleccionables** desde la UI:
 
 - 🌸 **Gemini** (`gemini-2.5-flash-lite`) — Visión multimodal de Google. Prompt de **resaltado estricto**: extrae únicamente el texto pintado con marcador. Alta precisión, free tier muy ajustado (~20 RPD).
-- ⚡ **Groq Llama 4 Scout** (`meta-llama/llama-4-scout-17b-16e-instruct`) — Visión vía endpoint OpenAI-compatible. Prompt de **página completa**: transcribe todo el texto. ~96% word recall vs Gemini, **~10× más rápido**, free tier **1000 RPD / 30 RPM** (50× más que Gemini). Motor recomendado para uso intensivo.
-- 💻 **Local (Tesseract.js)** — Corre 100% en el navegador (WASM + traineddata `spa` + `eng`). Sin cuota, sin red, sin backend. ~86% word recall. Fallback total si las APIs hosted se caen o agotan quota.
+- ⚡ **Groq Llama 4 Scout** (`meta-llama/llama-4-scout-17b-16e-instruct`) — Visión vía endpoint OpenAI-compatible. Prompt de **página completa forense**: transcribe todo el texto, notas al pie (`^N`) y anotaciones manuscritas (`[m: ...]`). ~96% word recall vs Gemini, **~10× más rápido**, free tier **1000 RPD / 30 RPM** (50× más que Gemini). Motor recomendado para lotes pesados.
+- 💻 **Local (Tesseract.js)** — Corre 100% en el navegador (WASM + traineddata `spa` + `eng`). Sin cuota, sin red, sin backend. Detecta líneas resaltadas y cuenta con fallback a página completa legible si la imagen no tiene marcador.
 
 ## 🏛 Arquitectura "EstacionAR"
 
@@ -38,26 +38,29 @@ El proyecto adopta el concepto arquitectónico estricto de Clean Architecture ba
 
 - **Clean Architecture Modular**: Tanto el frontend como el backend aíslan completamente cada *feature* en módulos auto-contenidos, promoviendo una escalabilidad robusta.
 - **Flujo Backend (Node/Express)**: La lógica expuesta a través de la API cuenta con la separación de:
-  `Router` ➡️ `Controller` ➡️ `Service` (gestión pura de Gemini AI y de reglas de negocio) ➡️ `Repository` / `Adapter`.
-- **Flujo Frontend (React)**: Diseño inspirado en *Feature-Sliced Design* (FSD) simplificado. La capa de presentación visual (Shadcn/Tailwind) es agnóstica de los manejos asincrónicos, confiando su lógica al Store Global (`Zustand`) y a la capa de Red.
-- **Tipado de Extremo a Extremo (E2E)**: Validaciones irrompibles con `Zod`, infiriendo y consumiendo los mismos esquemas lógicos en ambos extremos de la aplicación.
+  `Router` ➡️ `Controller` ➡️ `Service` (gestión pura de Gemini/Groq AI y reglas de negocio) ➡️ `Repository` / `Adapter`.
+- **Flujo Frontend (React)**: Diseño inspirado en *Feature-Sliced Design* (FSD) simplificado. La capa de presentación visual (Shadcn/Tailwind) es agnóstica de los manejos asincrónicos, confiando su lógica al Store Global (`Zustand`) y a la capa de Red (`fetch` nativo).
+- **Tipado de Extremo a Extremo (E2E)**: Validaciones irrompibles con `Zod`, infiriendo y consumiendo los mismos esquemas lógicos en ambos extremos de la aplicación (`@ocr-web/shared`).
+- **Post-Procesamiento Inteligente**: Reconstrucción de palabras cortadas por guiones de fin de línea (`cons-\ntitución`), eliminación de soft hyphens invisibles y protección de viñetas, listas y notas al pie.
 
 ## 🛠 Stack Tecnológico
 
 **Core & Herramientas:**
 - 📦 **Gestor de Paquetes:** `pnpm` (Exclusivo por velocidad y estricto control de dependencias)
 - 📝 **Lenguaje Base:** `TypeScript` E2E
+- 🧪 **Testing:** `Vitest` + `Supertest` en Backend y Frontend (`pnpm test`)
 
 **Backend:**
 - ⚙️ **Runtime:** Node.js + Express 5
 - 🧠 **Capa NLP/IA:** Adaptadores intercambiables — `GeminiOcrAdapter` (`@google/genai`) y `GroqOcrAdapter` (REST OpenAI-compatible)
-- 🛡️ **Validación / Procesamiento:** `Zod` para contratos y `Multer` para procesamiento óptico de buffers en memoria.
+- 🛡️ **Validación / Seguridad:** `Zod` para contratos, `Multer` para buffers en memoria y verificación binaria de firmas de archivo (*Magic Bytes*: JPEG, PNG, WebP, GIF, HEIC).
 
 **Frontend:**
 - ⚛️ **Framework UI:** React + Vite
 - 🎨 **Estilado y Componentes:** Tailwind CSS, Shadcn/ui y Radix UI
-- 🗃️ **Estado Global:** Zustand
-- 🔤 **OCR Offline:** `tesseract.js` (WASM) — motor local sin cuota, full-page con 4 rotaciones + scoring trigrama español.
+- 🌗 **Modo Oscuro:** `next-themes` con toggle accesible y paleta oscura de alto contraste
+- 🗃️ **Estado Global:** Zustand con persistencia y caché segregada por motor (`${engine}::${filename}::${size}`)
+- 🔤 **OCR Offline:** `tesseract.js` (WASM) — motor local sin cuota, 4 rotaciones + scoring trigrama español y fallback automático.
 
 ## 📂 Estructura del Proyecto
 
@@ -134,4 +137,12 @@ pnpm dev
 cd backend && pnpm dev
 # En terminal 2:
 cd frontend && pnpm dev
+```
+
+### 5. Pruebas Automatizadas
+
+Para ejecutar la suite completa de pruebas unitarias y de integración en todo el monorepo:
+
+```bash
+pnpm test
 ```

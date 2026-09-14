@@ -11,16 +11,18 @@ From repo root:
 - `pnpm build:shared` — compile `@ocr-web/shared` (`packages/shared/src/index.ts` → `dist/` via `tsc -p tsconfig.json`). Backend/frontend import the compiled output, so this must be fresh before their own dev/build runs.
 - `pnpm dev` — runs `pnpm build:shared` first, then starts backend + frontend together via `concurrently`. You don't need to build shared manually before `pnpm dev`.
 - `pnpm build` — chained build: shared → backend → frontend.
+- `pnpm test` — runs `pnpm build:shared` and then executes both backend and frontend test suites in Vitest.
 
 Backend (`pnpm --filter backend <cmd>` or run inside `backend/`):
 - `pnpm dev` — `ts-node-dev src/index.ts`, listens on `PORT` or `3001`
 - `pnpm build` — runs `pnpm --filter @ocr-web/shared build`, then `tsc` → `dist/`; production start is `node dist/index.js`.
-- `pnpm test` / `pnpm test:watch` — Vitest + Supertest. The single test file (`backend/tests/ocr.test.ts`) exercises `/api/ocr/extract` with a stub `OcrAdapter` injected via `createApp({ ocrController })`. The factory pattern is there specifically so tests can swap the Gemini SDK out — preserve it.
+- `pnpm test` / `pnpm test:watch` — Vitest + Supertest (`backend/tests/ocr.test.ts`). Exercises `/api/ocr/extract` with stub adapters (`gemini`, `groq`, `paddle`), rate limit mapping (429/503), error sanitization, and magic byte validation.
 - `pnpm lint` — ESLint.
 
 Frontend (`pnpm --filter frontend <cmd>` or run inside `frontend/`):
 - `pnpm dev` — Vite dev server
 - `pnpm build` — `tsc -b && vite build`
+- `pnpm test` — Vitest run (`useOcrStore.test.ts`, `textFormatters.test.ts`)
 - `pnpm lint` — ESLint (`eslint .`)
 - `pnpm preview` — preview prod build
 
@@ -57,9 +59,10 @@ Per-feature layering under `features/<feature>/`:
 **Server-side engine: only Gemini.** The `OcrEngineSchema` enum still includes `'paddle'` for backwards-compat with persisted client state, but the backend rejects `engine === 'paddle'` with HTTP 410 in `OcrService.getAdapter`. The local engine runs **entirely in the browser** via Tesseract.js (`frontend/src/lib/tesseractAdapter.ts`):
 - `GeminiOcrAdapter` — calls `@google/genai` with the pinned model, `temperature: 0`, `topP: 0.1`, `thinkingBudget: 1024`, **90 s timeout** (`GEMINI_TIMEOUT_MS = 90_000` in `ocr.service.ts`; previously 60 s but dense pages with many highlights legitimately took ~50 s and tripped premature timeouts). The timeout is implemented as a `Promise.race` against the SDK call. Uses `HIGHLIGHT_EXTRACTION_PROMPT` (chromatic filter) and is the **only** engine that respects `NO_HIGHLIGHT_SENTINEL`. Free tier 15 RPM / **20 RPD** per project (the Google dashboard says 1000 RPD but production logs confirm the real daily cap is 20; resets midnight Pacific).
 - `GroqOcrAdapter` — calls Groq's OpenAI-compatible chat completions endpoint (`api.groq.com/openai/v1/chat/completions`) with `meta-llama/llama-4-scout-17b-16e-instruct` (configurable via `GROQ_MODEL_ID`). Uses `FULL_PAGE_EXTRACTION_PROMPT` because Groq is stricter than Gemini on pale highlights and tends to return the no-text sentinel; full-page mode hits 96 % word recall vs Gemini ground truth on the same images (Gemini-strict prompt drops to 50 %). 60 s timeout via `AbortController`; explicit 429/5xx mapping. Free tier 30 RPM / 1000 RPD — recommended for batch workloads.
-- `recognizeLocal` (browser) — **no highlight mask anymore.** Earlier versions HSV-masked highlighted regions to mirror Gemini's chromatic-filter, but that dropped legible non-highlighted text and hurt similarity scores. The current pipeline OCRs the **full page** directly via a cached Tesseract.js worker (Spanish + English traineddata, **`PSM.AUTO`** — handles two-column layouts, headers/footers, and indented blocks better than `SINGLE_BLOCK`, which was tuned for the dead mask-mode worldview; LSTM-only). For unknown orientation it tries **four cardinal rotations** (0°/180°/90° CW/270° CW) and picks the result with the highest Spanish trigram-density score; it early-exits if the first pass is clearly clean. Worker is module-level cached and auto-terminated after 5 min idle to free ~150 MB. There is no `highlightMaskCanvas.ts` — do not look for it.
+- `recognizeLocal` (browser) — full-page LSTM OCR with fallback via cached Tesseract.js worker (Spanish + English traineddata, **`PSM.AUTO`**). For unknown orientation it tries **four cardinal rotations** (0°/180°/90° CW/270° CW) and picks the result with the highest confidence/trigram score. If highlighted lines are detected, it extracts them; if no highlighter marks exist on the page, it cleanly falls back to transcribing the full readable page. Worker is module-level cached and auto-terminated after 5 min idle to free ~150 MB.
+- `hasValidImageMagicBytes` (`backend/src/middlewares/upload.ts`) — validates binary magic signatures (JPEG, PNG, WebP, GIF, HEIC) to block corrupt or spoofed payloads before passing buffers to OCR services.
 
-**Sentinel contract is Gemini-only, not shared.** Only the Gemini adapter respects `NO_HIGHLIGHT_SENTINEL` (`"No se detectó texto resaltado en esta imagen."`), because only `HIGHLIGHT_EXTRACTION_PROMPT` instructs the model to emit that exact string when nothing is highlighted. Groq and Local use `FULL_PAGE_EXTRACTION_PROMPT` and transcribe everything — they never produce the sentinel. Frontend code that special-cases the sentinel must therefore gate on `engine === 'gemini'`, or it will silently break when other engines return free-form text.
+**Sentinel contract is Gemini-only, not shared.** Only the Gemini adapter respects `NO_HIGHLIGHT_SENTINEL` (`"No se detectó texto resaltado en esta imagen."`), because only `HIGHLIGHT_EXTRACTION_PROMPT` instructs the model to emit that exact string when nothing is highlighted. Groq and Local use `FULL_PAGE_EXTRACTION_PROMPT` or full-page fallback and transcribe everything — they never produce the sentinel. Frontend code that special-cases the sentinel must therefore gate on `engine === 'gemini'`, or it will silently break when other engines return free-form text.
 
 Shared config in `backend/src/config/`:
 - `env.ts` — Zod-validated env. `GEMINI_API_KEY` is `.optional()` at boot. The server only throws if a request hits the Gemini adapter without a key. The local engine never reaches the backend, so a missing key is fine if users always pick the local engine.
@@ -67,7 +70,7 @@ Shared config in `backend/src/config/`:
 - `logger.ts` — timestamped console wrapper; `info` gated by `NODE_ENV`. `withRequestId(id)` returns a scoped logger for per-request correlation.
 
 Middlewares in `backend/src/middlewares/`:
-- `upload.ts` — `uploadImage` multer instance: memory storage, 5 MB, 1 file max, `fileFilter` whitelists `jpeg|png|webp|gif|heic|heif`.
+- `upload.ts` — `uploadImage` multer instance: memory storage, 5 MB, 1 file max, `fileFilter` whitelists `jpeg|png|webp|gif|heic|heif`. Exports `hasValidImageMagicBytes` for binary magic byte verification.
 - `rateLimit.ts` — two limiters. `ocrLimiter` (25 req/min per IP, leaves headroom for Groq's 30 RPM ceiling while still tripping abuse before Gemini's 15 RPM) on `/api/ocr/*`; `globalLimiter` (300 req / 15 min per IP) app-wide.
 - `errorHandler.ts` — terminal middleware. Maps `MulterError` (413 on `LIMIT_FILE_SIZE`, else 400), `HttpError`, Gemini rate-limit detection (429), and unknown → 500. Always returns `ExtractResponse`-shaped JSON.
 - `requestId.ts` — assigns/propagates `X-Request-Id` header; attaches `req.requestId` for logger scoping.
@@ -79,14 +82,16 @@ Health: `GET /health` returns `{ status: 'ok', timestamp }`. Use it for Render u
 
 Feature-Sliced-Design-lite. Layers:
 - `features/ocr/components/` — presentation (Shadcn/Radix + Tailwind). `OcrDropzone` and `OcrWorkspace` are the two top-level states.
-- `store/useOcrStore.ts` — Zustand store; owns queue, per-file status, global progress, abort controller, and the upload loops (`processAll` / `processOne` / `processSelected` / `retryAllErrors` / `cancel` / `clearAll` with undo). `MAX_FILES = 200` ceiling; `MAX_ATTEMPTS = 5`. Inter-file pause depends on engine: Gemini = 5000 ms (15 RPM ceiling), Groq = 2500 ms (30 RPM ceiling), Paddle = 0 (browser-local).
-- **Persistence.** Wrapped with `zustand/middleware` `persist` (`name: 'ocr-web-state'`, `version: 4`, `localStorage`). `partialize` persists only `selectedEngine`, `fontSize`, and `textCache`. `textCache` is keyed by `${file.name}::${file.size}` so re-adding an already-OCR'd file rehydrates the result without another API call — do not bypass this cache when wiring new ingestion paths. If you change `textCache` shape, bump the persist `version`.
-- **Prewarm pipeline.** While file *i* is in Gemini, file *i+1* is pre-compressed in parallel (`ensureCompressed` stores the resulting `File` on the queue entry). Keep this; losing it ~doubles wall-clock on batches.
+- `store/useOcrStore.ts` — Zustand store; owns queue, per-file status, global progress, abort controller, and the upload loops (`processAll` / `processOne` / `processSelected` / `retryAllErrors` / `cancel` / `clearAll` with undo). `MAX_FILES = 200` ceiling; `MAX_ATTEMPTS = 5`. Inter-file pause depends on engine: Gemini = 6000 ms (10-15 RPM ceiling), Groq = 2000 ms (30 RPM ceiling), Paddle = 0 (browser-local).
+- **Persistence.** Wrapped with `zustand/middleware` `persist` (`name: 'ocr-web-state'`, `version: 4`, `localStorage`). `partialize` persists only `selectedEngine`, `fontSize`, and `textCache`. `textCache` is keyed by `${selectedEngine}::${file.name}::${file.size}` (with automatic fallback to legacy `${file.name}::${file.size}`) so switching engines or retrying never contaminates results from other models.
+- **Prewarm pipeline.** While file *i* is in Gemini/Groq, file *i+1* is pre-compressed in parallel (`ensureCompressed` stores the resulting `File` on the queue entry). Keep this; losing it ~doubles wall-clock on batches.
 - **Undo.** `clearAll` snapshots the queue + active id and keeps it for 12s before revoking preview URLs. `restoreCleared` rehydrates if called before expiry. If you remove files programmatically, use `removeFiles(ids)` so preview URLs are revoked.
-- `shared/api.ts` — cross-cutting: `getApiBase` trailing-slash normalizer, `isRateLimitMessage`, `processOcr(file, name, engine, signal)` (the only place that builds the multipart request), re-exports `OcrEngine` type from `@ocr-web/shared`.
+- `lib/textFormatters.ts` — `cleanOcrText` reconstructs hyphenated words across line breaks (standard hyphens, soft hyphens `\u00AD`, em/en-dashes), merges soft linebreaks within paragraphs, and explicitly protects numbered lists, bullet points, and footnotes.
+- `shared/api.ts` — cross-cutting: `getApiBase` trailing-slash normalizer, `isRateLimitMessage`, `processOcr(file, name, engine, signal)` (the only place that builds the multipart request), re-exports `OcrEngine` type from `@ocr-web/shared`. Pure `fetch` API.
 - Zod schemas live in the `@ocr-web/shared` workspace package (`packages/shared/src/index.ts`), imported by both backend and frontend. Single source of truth — do not re-declare in either side.
 - `lib/imageDownscale.ts` — canvas-based resize to 1600px max dimension at JPEG q=0.85 before upload; skips small files.
 - `components/ErrorBoundary.tsx` — wraps the whole app in `main.tsx`.
+- `components/ThemeToggle.tsx` + `next-themes` — Theme toggle with full dark mode palette (`.dark` tokens in `index.css`) positioned in headers.
 - `components/ui/` — Shadcn primitives (style `new-york`, base `zinc`, alias `@/*` → `src/*`, see `components.json` + `vite.config.ts`). `dialog.tsx` is the Radix-backed Dialog; `KawaiiModal` is a themed wrapper around it (ESC / focus trap / scroll lock handled by Radix).
 
 Response parsing uses `ExtractResponseSchema.safeParse` — don't bypass Zod and don't duplicate the interface.
@@ -95,8 +100,8 @@ Response parsing uses `ExtractResponseSchema.safeParse` — don't bypass Zod and
 - `docx` + `jszip` — exporters (`lib/exporters.ts`). Use these to emit `.docx` per file and to bundle a batch into a single `.zip`. Do not add a second word-processing or zip lib.
 - `sonner` — toast/notification surface. New non-blocking user feedback goes here, not into ad-hoc `<div>` banners.
 - `react-window` — virtualized list. Required when iterating `files[]` in a scrollable list, since the queue can reach `MAX_FILES = 200`. Plain `.map()` over the queue will jank.
-- `next-themes` — dark-mode provider. If asked for a theme toggle, wire through this; don't roll a custom `useEffect`-based one.
-- `axios` is listed as a dep but the only HTTP path used today is `fetch` in `shared/api.ts`. Prefer `fetch` for consistency — pulling in `axios` for a new call is a smell.
+- `next-themes` — dark-mode provider via `ThemeToggle.tsx`. Pure CSS variable architecture in `index.css`.
+- `vitest` — fast unit testing for store and text manipulation (`pnpm test`).
 
 ### Orchestrator / rate-limit strategy (critical)
 
