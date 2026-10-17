@@ -5,13 +5,11 @@ import { logger } from '../../config/logger';
 import type { OcrEngine } from '@ocr-web/shared';
 import { HttpError } from '../../middlewares/errorHandler';
 
-// flash (no lite): la visión de flash-lite es demasiado débil para distinguir
-// resaltadores pastel del fondo del papel. flash tiene free tier generoso
-// (~500 RPD, 10 RPM) y mucho mejor capacidad de análisis cromático.
-const MODEL_ID = 'gemini-2.5-flash';
-// 90s (antes 60s): muestras reales en samples del usuario tardan hasta 50s
-// para páginas densas con muchas regiones resaltadas. 60s dejaba poca cabeza
-// y disparaba timeouts antes de que la API terminara legitimamente.
+// Google AI Studio free tier: 1.500 req/día y 15 RPM.
+// gemini-3.5-flash (o configurable via env.GEMINI_MODEL_ID) ofrece excelente
+// velocidad (~4s) y capacidad cromática precisa para distinguir resaltadores pastel y flúor.
+const MODEL_ID = env.GEMINI_MODEL_ID;
+// 90s: páginas densas con muchas regiones resaltadas pueden tardar ~40-50s.
 const GEMINI_TIMEOUT_MS = 90_000;
 
 export interface OcrAdapter {
@@ -62,16 +60,11 @@ export class GeminiOcrAdapter implements OcrAdapter {
   }
 }
 
-// Groq Llama 4 Scout vision. Free tier: 1000 req/día y 30 req/min,
-// muy por encima de Gemini free (20 RPD). Misma calidad de OCR para
-// el caso de uso (texto resaltado o página completa) sin cuota
-// asfixiante. Endpoint OpenAI-compatible, no requiere SDK.
+// Groq Qwen 3.8 27B vision. Free tier: 1000 req/día y 30 req/min.
+// Respuestas en subsegundos con LPU chips. Configurado con
+// HIGHLIGHT_EXTRACTION_PROMPT para reconocer únicamente el texto resaltado.
+// Endpoint OpenAI-compatible, no requiere SDK.
 const GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
-// 45s (antes 60s): Llama 4 Scout responde una página normal en 3-12s. Cuando
-// pasa de ~45s casi siempre es la request colgada del lado de Groq, no trabajo
-// legítimo — y un timeout más corto evita que el cliente quede "cargando" hasta
-// 5 min acumulando reintentos de 60s. El cliente reintenta los timeouts pocas
-// veces (ver UpstreamBusy + MAX_GROQ_TIMEOUT_RETRIES en useOcrStore).
 const GROQ_TIMEOUT_MS = 45_000;
 
 export class GroqOcrAdapter implements OcrAdapter {
@@ -107,12 +100,12 @@ export class GroqOcrAdapter implements OcrAdapter {
           messages: [
             {
               role: 'system',
-              content: FULL_PAGE_EXTRACTION_PROMPT,
+              content: HIGHLIGHT_EXTRACTION_PROMPT,
             },
             {
               role: 'user',
               content: [
-                { type: 'text', text: 'Transcribí todo el texto visible en esta imagen siguiendo las instrucciones del sistema forense.' },
+                { type: 'text', text: 'Extraé únicamente el texto que tenga marcador resaltador encima según las instrucciones.' },
                 { type: 'image_url', image_url: { url: dataUrl } },
               ],
             },

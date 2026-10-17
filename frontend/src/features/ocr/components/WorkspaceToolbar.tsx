@@ -78,13 +78,13 @@ export function WorkspaceToolbar({
               <SelectItem value="gemini" className="font-bold">
                 <span className="flex items-center gap-2">
                   <Sparkles className="w-4 h-4 text-pink-500" aria-hidden />
-                  IA (Gemini) — Solo texto resaltado
+                  IA (Gemini Flash) — Solo texto resaltado (1500/día)
                 </span>
               </SelectItem>
               <SelectItem value="groq" className="font-bold">
                 <span className="flex items-center gap-2">
                   <Sparkles className="w-4 h-4 text-amber-500" aria-hidden />
-                  IA (Groq Llama) — Página completa (1000/día)
+                  IA (Groq Qwen 3.8) — Solo texto resaltado (1000/día)
                 </span>
               </SelectItem>
               <SelectItem value="paddle" className="font-bold">
