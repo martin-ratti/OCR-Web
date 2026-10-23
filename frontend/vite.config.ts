@@ -9,16 +9,20 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  worker: {
+    format: 'es',
+  },
   optimizeDeps: {
     include: ['@ocr-web/shared'],
+    exclude: ['onnxruntime-web'],
   },
   build: {
-    chunkSizeWarningLimit: 800,
+    chunkSizeWarningLimit: 900,
     rollupOptions: {
       output: {
         manualChunks(id) {
           if (!id.includes('node_modules')) return;
-          if (id.includes('tesseract.js')) return 'tesseract';
+          if (id.includes('paddleocr') || id.includes('onnxruntime-web')) return 'paddle-ocr';
           if (id.includes('docx') || id.includes('jszip')) return 'export';
           if (id.includes('@radix-ui')) return 'radix';
           if (id.includes('react-window')) return 'virtual';
