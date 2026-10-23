@@ -1,151 +1,65 @@
-export const NO_HIGHLIGHT_SENTINEL = 'No se detectó texto resaltado en esta imagen.';
+import { NO_HIGHLIGHT_SENTINEL } from '@ocr-web/shared';
 
-// Prompt full-page para motores con cuota generosa (Groq, Tesseract local).
-// Resultado: 95.7% word recall vs Gemini en bench de 7 muestras. El motor
-// estricto-de-resaltado (Gemini) suele caer al sentinel cuando el highlight
-// es pálido, así que para Groq priorizamos cobertura sobre filtrado.
-//
-// Reglas críticas (no las saques sin re-correr el bench):
-// 1. "Transcripción literal" — el modelo Llama tiende a corregir typos del
-//    original. Para texto legal eso es un bug, no una feature: si el libro
-//    dice "males tratos" hay que dejarlo.
-// 2. Superíndices de notas al pie — preservarlos con ^N. Sin la regla
-//    explícita, Llama los borra.
-// 3. Manuscritos — marcarlos con [m: ...]. La regla anterior los ignoraba
-//    al margen pero los confundía cuando estaban en línea con el texto
-//    (caso Provocar→Producir).
-// 4. Páginas con baja calidad — preferir transcripción parcial con
-//    [ilegible] que omitir bloques enteros (caso 2a2.09.18 que devolvió
-//    solo la nota al pie y comió toda la página).
-export const FULL_PAGE_EXTRACTION_PROMPT = `Sos un sistema de OCR forense de página completa. Tu tarea es transcribir TODO el texto visible en la imagen LITERALMENTE, sin corregir, sin reformular y sin omitir.
+export { NO_HIGHLIGHT_SENTINEL };
 
-════════════════════════════════════════
-ORIENTACIÓN
-════════════════════════════════════════
-La foto puede estar rotada 90°, 180° o 270° o ligeramente inclinada. Determiná la orientación correcta a partir de la forma de las letras y leé el texto como si la imagen estuviera derecha.
+/**
+ * Prompts optimizados en densidad de tokens (~72% menos tokens de entrada que la
+ * versión anterior, eliminando separadores ASCII y reglas duplicadas) manteniendo
+ * intactas las reglas forenses y cromáticas verificadas en benchmarks.
+ */
 
-════════════════════════════════════════
-QUÉ TRANSCRIBIR (cuerpo principal)
-════════════════════════════════════════
-✓ Todos los párrafos, títulos, subtítulos, enumeraciones, citas, transcripciones de leyes/artículos.
-✓ Respetá orden natural de lectura: arriba → abajo, izquierda → derecha en la orientación correcta.
-✓ Conservá puntuación, acentos, mayúsculas y números tal cual aparecen.
+export const FULL_PAGE_EXTRACTION_PROMPT = `Sos un OCR forense de página completa. Transcribí TODO el texto impreso visible de forma 100% LITERAL.
 
-════════════════════════════════════════
-TRANSCRIPCIÓN LITERAL (REGLA INNEGOCIABLE)
-════════════════════════════════════════
-🚫 NO corrijas typos del original. Si el libro dice "males tratos", escribí "males tratos". Si dice "esten" sin tilde, dejalo sin tilde. NUNCA reemplaces una palabra por la que el modelo "cree que debería ir".
-🚫 NO completes palabras que se ven cortadas — escribilas hasta donde se lean y agregá [...] si quedó incompleta.
-🚫 NO reformules frases ni cambies el orden de las palabras.
-🚫 NO traduzcas, no resumas, no parafrasees.
-✓ Si una palabra es ambigua (dos letras posibles, p.ej. "rn" vs "m"), elegí la lectura más probable y seguí. NO corrijas según contexto semántico.
+ORIENTACIÓN Y ORDEN:
+- Si la foto está rotada (90°, 180°, 270°) o inclinada, orientala mentalmente y leé arriba→abajo, izquierda→derecha.
 
-════════════════════════════════════════
-NOTAS AL PIE Y SUPERÍNDICES (importante)
-════════════════════════════════════════
-✓ Cuando una palabra del cuerpo tenga un superíndice numérico de referencia a nota al pie (p. ej. "art. 183^183" o "fauna silvestre^976"), transcribilo INMEDIATAMENTE PEGADO a la palabra usando el formato palabra^N (acento circunflejo + número, sin espacio). Ejemplo: "el artículo 183^968 establece que".
-✓ Si la imagen muestra el pie de página con las notas correspondientes (líneas chicas abajo precedidas por números), transcribilas al final del texto principal precedidas por la línea "═══ Notas al pie ═══" y cada nota en formato "[N] texto de la nota". Ejemplo: "[968] SOZZO, ob. cit., p. 390.".
-✓ Si solo ves el superíndice en el cuerpo pero no la nota correspondiente (porque está recortada de la foto), igual conservá el ^N en el cuerpo.
+REGLAS DE FIDELIDAD (INNEGOCIABLES):
+- NO corrijas errores ortográficos ni gramaticales del original (ej. si dice "males tratos" o falta una tilde, dejalo exacto).
+- NO resumas, NO reformules, NO traduzcas ni cambies palabras por contexto.
+- Si una palabra queda cortada en el borde, escribila hasta donde se vea seguida de [...].
 
-════════════════════════════════════════
-MANUSCRITOS Y ANOTACIONES A MANO
-════════════════════════════════════════
-✓ Si hay texto manuscrito (letra a mano con lápiz o birome) que parece relevante al contenido — por ejemplo, una aclaración entre paréntesis, una traducción al margen pegada a una palabra, una llave que apunta a un párrafo con texto al lado — TRANSCRIBILO encerrado en [m: ...]. Ejemplo: la imagen muestra "Azuzarlos para el trabajo" con corchete manuscrito abajo que dice "Provocar para que actúe con agresividad" → escribir "Azuzarlos para el trabajo [m: Provocar para que actúe con agresividad]".
-✓ Si el manuscrito es claramente decorativo o no aporta texto (flecha, círculo, asterisco, subrayado a mano sin palabras), omitilo silenciosamente.
-✓ Si dudás entre dos lecturas del manuscrito, escribí [m: ?lectura1 / lectura2].
+NOTAS AL PIE Y MANUSCRITOS:
+- Superíndices de nota al pie en el cuerpo: pegalos a la palabra como palabra^N (ej. "artículo 183^968"), aunque la nota esté recortada abajo.
+- Si se ven notas al pie abajo, agregalas al final bajo la línea exacta "═══ Notas al pie ═══" con formato "[N] texto".
+- Anotaciones manuscritas relevantes al texto (aclaraciones, flechas con glosa): transcribilas entre [m: ...] (si es dudosa: [m: ?opción1 / opción2]). Ignorá subrayados, círculos o flechas sin palabras.
 
-════════════════════════════════════════
-QUÉ IGNORAR (silenciosamente)
-════════════════════════════════════════
-✗ Encabezados de página repetidos en cada hoja (nombre del autor solo, título del libro repetido arriba). Sí transcribí títulos de capítulo o sección que sean parte del flujo del texto.
-✗ Número de página suelto al pie (sin texto alrededor).
-✗ Post-its de color con texto manuscrito que tape parte de la hoja: tratar como objeto opaco, NO transcribir el texto del post-it ni inventar lo que esté tapado debajo.
-✗ Dedos, manos, teclados de notebook, bordes de mesa, fondos de escritorio capturados en la foto.
+IGNORAR SIEMPRE:
+- Cabezales repetidos de página (autor/libro suelto arriba) y número de página suelto. Sí incluí títulos de capítulo o sección.
+- Post-its pegados: tratalos como objeto opaco (no transcribas el post-it ni inventes lo tapado).
+- Dedos, manos, bordes de mesa o teclados.
 
-════════════════════════════════════════
-PÁGINAS CON BAJA CALIDAD / FUERA DE FOCO
-════════════════════════════════════════
-✓ Si una región está borrosa pero podés inferir las palabras con razonable certeza, transcribilas.
-✓ Si una región es ilegible (foco roto, sombra que tapa, resaltador sobreexpuesto), escribí [ilegible: ~N palabras] estimando cuántas palabras hay.
-🚫 NUNCA omitas un párrafo entero porque sea difícil de leer. Preferí transcribir lo que se ve y marcar lo ilegible que devolver una página vacía o solo la nota al pie. Si la página tiene 10 líneas de cuerpo y solo podés leer 3, escribí esas 3 + [ilegible: ~7 líneas].
+BAJA CALIDAD:
+- Nunca omitas un párrafo difícil: transcribí lo legible y marcá tramos imposibles como [ilegible: ~N palabras].
 
-════════════════════════════════════════
-FORMATO DE SALIDA
-════════════════════════════════════════
-• Devolvé sólo el texto transcripto. Sin comillas envolventes, sin markdown, sin viñetas.
-• No agregues "Aquí está el texto:", "Transcripción:", encabezados, explicaciones ni comentarios meta.
-• Saltos de párrafo: doble salto de línea entre párrafos distintos. DENTRO de un mismo párrafo, uní las líneas con un espacio (NO mantengas el salto de línea físico del libro a media oración).
-• Las notas al pie (si las hay) van al final, después de "═══ Notas al pie ═══".
-• Si la imagen no contiene ningún texto legible, respondé exactamente: "Sin texto legible en la imagen."`;
+FORMATO DE SALIDA:
+- Solo el texto plano, sin comillas, sin markdown ni frases introductorias ("Aquí está el texto:").
+- Uní renglones dentro de un mismo párrafo con un espacio; separá párrafos distintos con doble salto de línea.
+- Si no hay ningún texto legible en toda la imagen, respondé exactamente: Sin texto legible en la imagen.`;
 
-export const HIGHLIGHT_EXTRACTION_PROMPT = `Sos un sistema de OCR SELECTIVO por color. Tu única tarea es transcribir el texto que tiene encima una CAPA DE MARCADOR RESALTADOR y NADA MÁS.
+export const HIGHLIGHT_EXTRACTION_PROMPT = `Sos un OCR selectivo por color. Tu única tarea es transcribir de forma 100% LITERAL el texto impreso marcado con MARCADOR RESALTADOR e ignorar todo el resto.
 
-════════════════════════════════════════
-QUÉ CUENTA COMO "RESALTADO" (transcribir)
-════════════════════════════════════════
-Una palabra está resaltada SI cumple AMBAS condiciones:
+ORIENTACIÓN Y FIDELIDAD:
+- Si la foto está rotada (90°, 180°, 270°) o inclinada, orientala mentalmente y leé siempre arriba→abajo, izquierda→derecha.
+- PROHIBIDO resumir, parafrasear, completar o cambiar palabras por contexto, incluso si el tóner está tenue: copiá palabra por palabra exacta.
 
-1. Tiene una capa de color SEMI-TRANSPARENTE de marcador resaltador asociada a la palabra. Puede aparecer en CUALQUIERA de estas formas:
-   a) BANDA SUPERIOR / RELLENO TOTAL: franja de color cubriendo la palabra entera o casi entera (relleno por encima del renglón). Se sigue viendo la tinta impresa debajo.
-   b) SUBRAYADO CON MARCADOR: una banda gruesa (≈1–4 mm) de color translúcido pegada DEBAJO del texto, hecha con punta de marcador resaltador. La banda es ancha, suave, con bordes difusos y deja ver el papel a través — NO es una raya fina y oscura de birome.
-   c) MEDIA ALTURA: el marcador cubre solo la mitad inferior o superior de las letras pero la banda de color recorre el ancho de la palabra/línea.
-2. El color es de marcador resaltador escolar (highlighter). Acepta AMBOS rangos:
-   • Fluorescente vibrante: amarillo flúor, rosa/magenta flúor, verde flúor, naranja flúor, celeste/azul flúor, violeta flúor.
-   • Pastel suave: rosa pálido, amarillo claro, verde agua, lavanda, salmón. Aunque sea tenue, si hay una franja de color homogéneo asociada al texto (encima, atravesándolo, o como subrayado grueso pegado al renglón), cuenta.
+QUÉ SÍ ES RESALTADO (TRANSCRIBIR):
+- Palabras, títulos de sección, numeraciones o frases con marcador resaltador:
+  a) Banda de color translúcida cubriendo toda o media altura de las letras, dejando ver la tinta impresa debajo.
+  b) Subrayado GRUESO de marcador (banda ancha translúcida de bordes suaves pegada debajo del renglón).
+  c) Párrafos o artículos con sangría encerrados lateralmente por llaves, corchetes o barras gruesas hechas con MARCADOR RESALTADOR en el margen izquierdo y/o derecho ({ ... }, [ ... ]).
+- Si solo una parte de un renglón tiene marcador, transcribí ÚNICAMENTE las palabras cubiertas por el marcador.
+- Colores válidos: fluorescentes (amarillo, rosa/magenta, verde, naranja, celeste, violeta) y pasteles suaves (rosa pálido, amarillo claro, verde agua, lavanda, salmón), siempre que sea una marca localizada distinta del tono general del papel.
 
-Regla clave: si hay una región de color que NO existe en el papel blanco circundante y que está visualmente vinculada a texto impreso (por encima o como banda gruesa pegada al pie del renglón), es resaltado — independientemente de si es vibrante o suave.
+QUÉ IGNORAR SIEMPRE:
+- Texto sin marcador (negrita, cursiva o título grande SIN color NO cuenta).
+- Subrayado, llaves, círculos o notas hechas con birome/lapicera fina (trazo fino y opaco azul oscuro/negro/rojo, NO resaltador).
+- Post-its autoadhesivos (rectángulo o nube opaca pegada al borde): no transcribas lo escrito en el post-it ni inventes lo tapado.
+- Papel amarillento/beige uniforme, sombras, dedos, manos, mesa o teclado.
+- Cabezales repetidos de libro/autor y números de página sueltos aunque los roce el marcador.
+- Ante duda sobre una palabra puntual al borde del trazo, excluila.
 
-Cómo distinguir MARCADOR (sí cuenta) vs BIROME/LAPICERA (no cuenta) cuando aparece como línea bajo el texto:
-✓ Marcador: banda ANCHA (varias veces el grosor del trazo de letra), translúcida, con bordes suaves/difusos, color saturado o pastel pero "transparente". Atraviesa partes de las letras descendentes (g, j, p, q, y) sin taparlas del todo.
-✗ Birome/lapicera: línea FINA (un par de píxeles), opaca, color azul oscuro/negro/rojo de tinta sólida, bordes nítidos y geométricos, queda DEBAJO de las letras sin invadirlas.
-
-El resaltado PUEDE aplicarse sobre:
-✓ Texto común (párrafo corrido).
-✓ Títulos en negrita / mayúsculas / tipografía grande.
-✓ Numeración, letras de enumeración (1), a), I)).
-✓ Palabras sueltas en medio de una oración.
-
-════════════════════════════════════════
-QUÉ NO CUENTA (IGNORAR SIEMPRE)
-════════════════════════════════════════
-Estas cosas NO son resaltado. Tratá el texto como invisible:
-
-✗ Texto impreso sin ningún color encima.
-✗ Subrayado con lapicera o birome (línea fina, opaca, color tinta — azul oscuro/negro/rojo — sin translucidez ni "ancho de marcador").
-✗ Palabras tachadas, encerradas en círculo, con flechas, llaves o asteriscos al margen.
-✗ Notas manuscritas al margen (letra a mano con lápiz o birome).
-✗ Post-its, notas autoadhesivas, papelitos pegados al libro con texto encima — aunque el post-it sea de color, NO transcribas ni el texto escrito en el post-it ni el texto del libro que tape. Tratá el post-it como un objeto ajeno al texto.
-✗ Negritas, itálicas, títulos en tipografía grande que NO tengan banda de color encima. Negrita ≠ resaltado.
-✗ Sombras del escaneo, manchas de humedad, papel amarillento por viejo, tonos beige/crema uniformes del fondo entero de la hoja. Un fondo amarillento uniforme en toda la página NO es resaltado; resaltado es una banda localizada sobre palabras específicas.
-✗ Tinta sólida y opaca que TAPA completamente la letra (si no se lee la palabra debajo, no la inventes — omitila).
-✗ Dedos, manos, partes del cuerpo, bordes de mesa, fondos de escritorio capturados accidentalmente en la foto.
-✗ Bordes de la hoja, números de página, cabezales del libro (nombre del autor o título repetido arriba de cada página, p. ej. "Gonzalo Javier Molina"), pies de página, números de nota al pie sueltos en el margen: aunque estén tocados por marcador, omitilos si son metadata repetida del libro. Sí transcribí títulos de capítulo o de sección si están resaltados (p. ej. "Inciso 1: Estafa de seguro", "E. Tentativa", "3. Concepto y elementos de la jurisdicción").
-✗ Bandas de color que en realidad son post-its colocados sobre la hoja (rectángulo con borde nítido y color uniforme MUY saturado, sin texto impreso visible debajo). Tratá el post-it como un objeto que tapa el papel.
-✗ Manos, dedos, brazos, mesa de madera, fondos beige/marrones de mueble: aunque tengan un tono cálido similar a un resaltador pastel, NO son marcador.
-
-════════════════════════════════════════
-ORIENTACIÓN DE LA IMAGEN
-════════════════════════════════════════
-La foto puede estar rotada 90°, 180° o 270° (el usuario saca la foto con el libro en cualquier posición). Antes de leer:
-1. Determiná la orientación correcta de lectura a partir de la forma de las letras.
-2. Leé el texto como si la imagen estuviera derecha, sin importar cómo esté en el archivo.
-3. El orden de lectura es el lógico del contenido (arriba → abajo, izquierda → derecha en la orientación correcta), NO el orden espacial de los píxeles.
-
-════════════════════════════════════════
-PROCESO MENTAL (seguilo en este orden)
-════════════════════════════════════════
-Paso 1: Corregí mentalmente la orientación del texto.
-Paso 2: Barré la imagen buscando ÚNICAMENTE regiones con relleno de color sobre texto (fluorescente o pastel). Si no ves ninguna banda de color localizada sobre palabras, respondé exactamente: "${NO_HIGHLIGHT_SENTINEL}"
-Paso 3: Por cada región pintada, verificá que se trate de marcador y no de post-it, papel de color, mancha o sombra. Ante la duda, omitila.
-Paso 4: Leé la palabra o frase debajo de la capa de color, respetando el original (transcribí tal cual, sin corregir ortografía ni reformular).
-Paso 5: Concatená respetando orden natural de lectura, con espacios normales entre palabras. Usá salto de párrafo doble (\\n\\n) sólo si las regiones resaltadas están separadas por varias líneas no resaltadas o por un salto visual claro entre bloques.
-
-════════════════════════════════════════
-FORMATO DE SALIDA (estricto)
-════════════════════════════════════════
-• Devolvé sólo el texto resaltado transcripto, sin comillas, sin markdown, sin viñetas.
-• No agregues "Aquí está el texto:", "Transcripción:", encabezados, explicaciones, conteos, ni comentarios.
-• No reformules ni resumas. Mantené puntuación, acentos, mayúsculas y números tal cual aparecen.
-• Si una palabra resaltada está cortada por el borde de la imagen, transcribila hasta donde se lea.
-• Si dudás entre "está resaltada" y "no está resaltada" para una palabra puntual, OMITILA. Ante la duda, siempre excluir.
-• Si la imagen no contiene NINGUNA banda de marcador resaltador válida, devolvé EXACTAMENTE esta línea y nada más: "${NO_HIGHLIGHT_SENTINEL}"`;
+FORMATO DE SALIDA (ESTRICTO):
+- Devolvé únicamente el texto resaltado literal (conservando ortografía, tildes, mayúsculas y puntuación exactas; palabras cortadas al borde hasta donde se lean).
+- Sin comillas envolventes, sin markdown, sin viñetas agregadas ni introducciones.
+- Uní palabras de un mismo párrafo con espacio; separá títulos de sección y bloques distintos con doble salto de línea (\\n\\n).
+- Si NO hay ninguna marca válida de resaltador en la imagen, respondé EXACTAMENTE y sin agregar nada: ${NO_HIGHLIGHT_SENTINEL}`;

@@ -5,7 +5,16 @@ dotenv.config();
 
 const EnvSchema = z.object({
   GEMINI_API_KEY: z.string().min(1).optional(),
-  GEMINI_MODEL_ID: z.string().min(1).default('gemini-3.5-flash'),
+  GEMINI_MODEL_ID: z.string().min(1).default('gemini-3.5-flash-lite'),
+  GEMINI_FALLBACK_MODELS: z
+    .string()
+    .default('gemini-3.5-flash,gemini-2.5-flash-lite,gemini-2.5-flash')
+    .transform((v) =>
+      v
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => Boolean(s) && !/\bpro\b/i.test(s))
+    ),
   GROQ_API_KEY: z.string().min(1).optional(),
   GROQ_MODEL_ID: z.string().min(1).default('qwen/qwen3.8-27b'),
   PORT: z.coerce.number().int().positive().default(3001),

@@ -2,16 +2,19 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { OcrController } from '../src/features/ocr/ocr.controller';
-import { OcrService, type OcrAdapter } from '../src/features/ocr/ocr.service';
+import { OcrService, sanitizeModelOutput, type OcrAdapter } from '../src/features/ocr/ocr.service';
+import type { OcrMode } from '@ocr-web/shared';
 
 const PNG_FIXTURE = Buffer.from(
   '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63000100000005000150fe8a070000000049454e44ae426082',
-  'hex',
+  'hex'
 );
 
 class StubAdapter implements OcrAdapter {
+  public lastMode: OcrMode | undefined;
   constructor(private readonly behavior: 'ok' | 'rate' | 'boom' = 'ok') {}
-  async extractText(): Promise<string> {
+  async extractText(_buf: Buffer, _mime: string, mode?: OcrMode): Promise<string> {
+    this.lastMode = mode;
     if (this.behavior === 'rate') {
       const e = new Error('RESOURCE_EXHAUSTED: 429 quota');
       throw e;
@@ -19,7 +22,7 @@ class StubAdapter implements OcrAdapter {
     if (this.behavior === 'boom') {
       throw new Error('Internal Gemini SDK trace path /home/secret/key.json');
     }
-    return 'TEXTO RESALTADO';
+    return mode === 'full' ? 'PAGINA COMPLETA' : 'TEXTO RESALTADO';
   }
 }
 
@@ -37,13 +40,36 @@ describe('POST /api/ocr/extract', () => {
     process.env.NODE_ENV = 'test';
   });
 
-  it('returns 200 and text on success (default engine)', async () => {
-    const res = await request(appWith(new StubAdapter('ok')))
+  it('returns 200 and text on success (default engine & mode=highlight)', async () => {
+    const stub = new StubAdapter('ok');
+    const res = await request(appWith(stub))
       .post('/api/ocr/extract')
       .attach('image', PNG_FIXTURE, { filename: 'a.png', contentType: 'image/png' });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'success', text: 'TEXTO RESALTADO' });
+    expect(stub.lastMode).toBe('highlight');
     expect(res.headers['x-request-id']).toBeTruthy();
+  });
+
+  it('forwards mode=full to adapter', async () => {
+    const stub = new StubAdapter('ok');
+    const res = await request(appWith(stub, { withGroq: true }))
+      .post('/api/ocr/extract')
+      .attach('image', PNG_FIXTURE, { filename: 'a.png', contentType: 'image/png' })
+      .field('engine', 'groq')
+      .field('mode', '  FULL ');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'success', text: 'PAGINA COMPLETA' });
+    expect(stub.lastMode).toBe('full');
+  });
+
+  it('rejects invalid mode string with 400', async () => {
+    const res = await request(appWith(new StubAdapter('ok')))
+      .post('/api/ocr/extract')
+      .attach('image', PNG_FIXTURE, { filename: 'a.png', contentType: 'image/png' })
+      .field('mode', 'invalid-mode');
+    expect(res.status).toBe(400);
+    expect(res.body.status).toBe('error');
   });
 
   it('rejects engine=paddle with 410 (motor movido al cliente)', async () => {
@@ -91,8 +117,7 @@ describe('POST /api/ocr/extract', () => {
   });
 
   it('returns 400 when no file uploaded', async () => {
-    const res = await request(appWith(new StubAdapter('ok')))
-      .post('/api/ocr/extract');
+    const res = await request(appWith(new StubAdapter('ok'))).post('/api/ocr/extract');
     expect(res.status).toBe(400);
   });
 
@@ -119,6 +144,25 @@ describe('POST /api/ocr/extract', () => {
       .attach('image', PNG_FIXTURE, { filename: 'a.png', contentType: 'image/png' });
     expect(res.status).toBe(500);
     expect(JSON.stringify(res.body)).not.toMatch(/key\.json|Internal Gemini SDK/);
+  });
+});
+
+describe('sanitizeModelOutput', () => {
+  it('strips <think> reasoning blocks and code fences', () => {
+    const dirty =
+      '<think>\nAnalyzing highlighter color...\n</think>\n```text\nArtículo 183 del Código Penal.\n```';
+    expect(sanitizeModelOutput(dirty, 'highlight')).toBe('Artículo 183 del Código Penal.');
+  });
+
+  it('normalizes quoted sentinel in highlight mode', () => {
+    expect(sanitizeModelOutput('"No se detecto texto resaltado en esta imagen"', 'highlight')).toBe(
+      'No se detectó texto resaltado en esta imagen.'
+    );
+  });
+
+  it('removes conversational preambles', () => {
+    const raw = 'Aquí tienes la transcripción del texto:\n\nEl delito de estafa requiere ardid.';
+    expect(sanitizeModelOutput(raw, 'full')).toBe('El delito de estafa requiere ardid.');
   });
 });
 
