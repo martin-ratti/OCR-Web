@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ocrSelectors, useOcrStore } from '../../../store/useOcrStore';
-import { exportDocx, exportSingleTxt } from '../../../lib/exporters';
+import { exportDocx, exportSingleTxt, exportZipTxt } from '../../../lib/exporters';
 import { reportAddFilesResult } from '../../../lib/addFilesFeedback';
 import { KawaiiModal } from './KawaiiModal';
 import { OriginalViewer } from './OriginalViewer';
@@ -13,8 +13,8 @@ import { Progress } from '@/components/ui/progress';
 
 import pandaImg from '../../../assets/panda.png';
 import monkeyImg from '../../../assets/monkey.png';
-import { subscribeTesseractProgress, type TesseractProgress } from '../../../lib/tesseractAdapter';
-import { cleanOcrText } from '../../../lib/textFormatters';
+import { subscribeLocalOcrProgress, type LocalOcrProgress } from '../../../lib/paddleAdapter';
+import { cleanOcrText, isEmptyExtractionText } from '../../../lib/textFormatters';
 
 const MIN_FONT = 12;
 const MAX_FONT = 28;
@@ -25,11 +25,15 @@ export function OcrWorkspace() {
   const globalStatus = useOcrStore(ocrSelectors.globalStatus);
   const globalProgress = useOcrStore(ocrSelectors.globalProgress);
   const selectedEngine = useOcrStore(ocrSelectors.selectedEngine);
+  const extractionMode = useOcrStore(ocrSelectors.extractionMode);
+  const quotaSavedCount = useOcrStore(ocrSelectors.quotaSavedCount);
   const fontSize = useOcrStore(ocrSelectors.fontSize);
 
   const updateFileResult = useOcrStore((s) => s.updateFileResult);
   const setActiveFile = useOcrStore((s) => s.setActiveFile);
   const processAll = useOcrStore((s) => s.processAll);
+  const processOne = useOcrStore((s) => s.processOne);
+  const processOneFullPage = useOcrStore((s) => s.processOneFullPage);
   const forceRetry = useOcrStore((s) => s.forceRetry);
   const clearAll = useOcrStore((s) => s.clearAll);
   const restoreCleared = useOcrStore((s) => s.restoreCleared);
@@ -37,16 +41,18 @@ export function OcrWorkspace() {
   const removeFile = useOcrStore((s) => s.removeFile);
   const retryAllErrors = useOcrStore((s) => s.retryAllErrors);
   const reorderFile = useOcrStore((s) => s.reorderFile);
+  const rotateFilePreview = useOcrStore((s) => s.rotateFilePreview);
   const setSelectedEngine = useOcrStore((s) => s.setSelectedEngine);
+  const setExtractionMode = useOcrStore((s) => s.setExtractionMode);
   const setFontSize = useOcrStore((s) => s.setFontSize);
   const addFiles = useOcrStore((s) => s.addFiles);
 
   const [showConfirmClear, setShowConfirmClear] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
-  const [tessProgress, setTessProgress] = useState<TesseractProgress | null>(null);
+  const [localProgress, setLocalProgress] = useState<LocalOcrProgress | null>(null);
 
-  useEffect(() => subscribeTesseractProgress(setTessProgress), []);
+  useEffect(() => subscribeLocalOcrProgress(setLocalProgress), []);
   const editorRef = useRef<ExtractedEditorHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -56,29 +62,32 @@ export function OcrWorkspace() {
   );
   const counts = useMemo(() => {
     let success = 0;
+    let exportable = 0;
     let error = 0;
     let pending = 0;
     let processing = 0;
     for (const f of files) {
-      if (f.status === 'success') success++;
-      else if (f.status === 'error') error++;
+      if (f.status === 'success') {
+        success++;
+        if (!isEmptyExtractionText(f.resultText)) exportable++;
+      } else if (f.status === 'error') error++;
       else if (f.status === 'idle') pending++;
       else if (f.status === 'processing') processing++;
     }
-    return { success, error, pending, processing };
+    return { success, exportable, error, pending, processing };
   }, [files]);
 
   const working = globalStatus === 'working';
-  const canEditorAct = !!activeFile?.resultText;
+  const canEditorAct = !!activeFile?.resultText && !isEmptyExtractionText(activeFile.resultText);
 
   const handleCleanFormat = () => {
-    if (!activeFile?.resultText) return;
+    if (!activeFile?.resultText || isEmptyExtractionText(activeFile.resultText)) return;
     updateFileResult(activeFile.id, cleanOcrText(activeFile.resultText));
     toast.success('Párrafos y guiones ordenados');
   };
 
   const handleCopy = async (): Promise<boolean> => {
-    if (!activeFile?.resultText) return false;
+    if (!activeFile?.resultText || isEmptyExtractionText(activeFile.resultText)) return false;
     try {
       await navigator.clipboard.writeText(activeFile.resultText);
       toast.success('Texto copiado');
@@ -90,7 +99,7 @@ export function OcrWorkspace() {
   };
 
   const handleSave = async () => {
-    if (!activeFile?.resultText) return;
+    if (!activeFile?.resultText || isEmptyExtractionText(activeFile.resultText)) return;
     await exportSingleTxt({ filename: activeFile.file.name, text: activeFile.resultText });
   };
   const handleSaveRef = useRef(handleSave);
@@ -100,23 +109,33 @@ export function OcrWorkspace() {
 
   const collectDoneItems = () =>
     files
-      .filter((f) => f.status === 'success' && f.resultText)
+      .filter((f) => f.status === 'success' && !isEmptyExtractionText(f.resultText))
       .map((f) => ({ filename: f.file.name, text: f.resultText! }));
 
   const handleExportDocx = async () => {
     const items = collectDoneItems();
     if (items.length === 0) {
-      toast.warning('No hay textos extraídos todavía');
+      toast.warning('No hay apuntes con texto extraído para exportar');
       return;
     }
     await exportDocx(items);
     toast.success(`Documento .docx con ${items.length} apunte(s)`);
   };
 
+  const handleExportZip = async () => {
+    const items = collectDoneItems();
+    if (items.length === 0) {
+      toast.warning('No hay apuntes con texto extraído para exportar');
+      return;
+    }
+    await exportZipTxt(items);
+    toast.success(`Archivo .zip con ${items.length} apunte(s)`);
+  };
+
   const handleCopyAll = async () => {
     const items = collectDoneItems();
     if (items.length === 0) {
-      toast.warning('No hay textos extraídos todavía');
+      toast.warning('No hay apuntes con texto extraído todavía');
       return;
     }
     const joined = items
@@ -128,6 +147,11 @@ export function OcrWorkspace() {
     } catch {
       toast.error('No se pudo copiar todo');
     }
+  };
+
+  const handleSwitchToLocalAndRetry = (id: string) => {
+    setSelectedEngine('paddle');
+    void processOne(id);
   };
 
   const handleEditorChange = (text: string) => {
@@ -207,7 +231,7 @@ export function OcrWorkspace() {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         if (canEditorAct) {
           e.preventDefault();
-          handleSaveRef.current();
+          void handleSaveRef.current();
         }
         return;
       }
@@ -301,10 +325,10 @@ export function OcrWorkspace() {
 
       {isDraggingOver && (
         <div
-          className="absolute inset-0 z-30 flex items-center justify-center bg-pink-100/80 border-4 border-dashed border-pink-400 rounded-3xl pointer-events-none"
+          className="absolute inset-0 z-30 flex items-center justify-center bg-pink-100/80 dark:bg-pink-950/80 border-4 border-dashed border-pink-400 rounded-3xl pointer-events-none"
           aria-hidden
         >
-          <div className="flex flex-col items-center gap-2 text-pink-600">
+          <div className="flex flex-col items-center gap-2 text-pink-600 dark:text-pink-200">
             <UploadCloud className="w-16 h-16 motion-safe:animate-bounce" />
             <span className="font-extrabold text-lg">¡Sueltalo acá, negra!</span>
           </div>
@@ -325,10 +349,13 @@ export function OcrWorkspace() {
       <div className="flex flex-col h-full w-full paper-card overflow-visible relative z-10 group">
         <WorkspaceToolbar
           selectedEngine={selectedEngine}
+          extractionMode={extractionMode}
+          quotaSavedCount={quotaSavedCount}
           onSelectEngine={setSelectedEngine}
+          onSelectMode={setExtractionMode}
           working={working}
           pendingPlusErrorCount={counts.pending + counts.error}
-          successCount={counts.success}
+          exportableCount={counts.exportable}
           canEditorAct={canEditorAct}
           fontSize={fontSize}
           minFontSize={MIN_FONT}
@@ -339,17 +366,19 @@ export function OcrWorkspace() {
           onClear={() => setShowConfirmClear(true)}
           onCopyAll={handleCopyAll}
           onExportDocx={handleExportDocx}
+          onExportZip={handleExportZip}
+          onSaveSingleTxt={handleSave}
           onCleanFormat={handleCleanFormat}
           onFontSizeChange={setFontSize}
         />
 
         {working && (
           <div
-            className="bg-pink-50 border-b-2 border-pink-100 px-4 py-1.5"
+            className="bg-pink-50 dark:bg-pink-950/40 border-b-2 border-pink-100 dark:border-pink-950 px-4 py-1.5"
             role="status"
             aria-live="polite"
           >
-            <div className="flex items-center justify-between text-xs font-extrabold text-pink-600 mb-1.5">
+            <div className="flex items-center justify-between text-xs font-extrabold text-pink-600 dark:text-pink-300 mb-1.5">
               <span className="inline-flex items-center gap-1.5">
                 <ScanLine className="w-3.5 h-3.5 motion-safe:animate-pulse" aria-hidden />
                 Procesando {counts.processing || '—'} /{' '}
@@ -360,28 +389,29 @@ export function OcrWorkspace() {
             <Progress
               value={globalProgress}
               aria-label="Progreso del lote"
-              className="h-2 bg-pink-100 [&>div]:bg-pink-400"
+              className="h-2 bg-pink-100 dark:bg-pink-950 [&>div]:bg-pink-400"
             />
           </div>
         )}
 
-        {selectedEngine === 'paddle' && tessProgress && tessProgress.status === 'loading' && (
+        {selectedEngine === 'paddle' && localProgress && localProgress.status === 'loading' && (
           <div
-            className="bg-indigo-50 border-b-2 border-indigo-100 px-4 py-1.5"
+            className="bg-indigo-50 dark:bg-indigo-950/50 border-b-2 border-indigo-100 dark:border-indigo-900 px-4 py-1.5"
             role="status"
             aria-live="polite"
           >
-            <div className="flex items-center justify-between text-xs font-extrabold text-indigo-600 mb-1.5">
+            <div className="flex items-center justify-between text-xs font-extrabold text-indigo-600 dark:text-indigo-300 mb-1.5">
               <span className="inline-flex items-center gap-1.5">
                 <Cpu className="w-3.5 h-3.5 motion-safe:animate-pulse" aria-hidden />
-                Cargando motor local (1ª vez, ~10 MB)...
+                Cargando modelo local PP-OCRv6 (1ª vez, queda guardado offline)
+                {localProgress.device ? ` · ${localProgress.device.toUpperCase()}` : ''}...
               </span>
-              <span>{Math.round(tessProgress.progress * 100)}%</span>
+              <span>{Math.round(localProgress.progress * 100)}%</span>
             </div>
             <Progress
-              value={Math.round(tessProgress.progress * 100)}
+              value={Math.round(localProgress.progress * 100)}
               aria-label="Progreso de carga del motor local"
-              className="h-2 bg-indigo-100 [&>div]:bg-indigo-400"
+              className="h-2 bg-indigo-100 dark:bg-indigo-950 [&>div]:bg-indigo-400"
             />
           </div>
         )}
@@ -403,13 +433,16 @@ export function OcrWorkspace() {
           />
 
           <div className="flex flex-1 min-w-0 flex-col md:flex-row">
-            <OriginalViewer activeFile={activeFile} />
+            <OriginalViewer activeFile={activeFile} onRotate={rotateFilePreview} />
             <ExtractedEditor
               ref={editorRef}
               activeFile={activeFile}
               fontSize={fontSize}
+              working={working}
               onChange={handleEditorChange}
               onCopy={handleCopy}
+              onReadFullPage={processOneFullPage}
+              onSwitchToLocalAndRetry={handleSwitchToLocalAndRetry}
             />
           </div>
         </div>

@@ -1,18 +1,19 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { useOcrStore } from './useOcrStore';
+import { buildCacheKey, useOcrStore } from './useOcrStore';
 import { isRateLimitMessage, isUpstreamBusyMessage } from '../shared/api';
 
 describe('useOcrStore', () => {
   beforeEach(() => {
-    // Reset store state
     useOcrStore.setState({
       files: [],
       activeFileId: null,
       globalStatus: 'idle',
       globalProgress: 0,
       selectedEngine: 'gemini',
-      fontSize: 15,
+      extractionMode: 'highlight',
+      fontSize: 16,
       textCache: {},
+      quotaSavedCount: 0,
       lastClearedSnapshot: null,
     });
   });
@@ -21,17 +22,22 @@ describe('useOcrStore', () => {
     const state = useOcrStore.getState();
     expect(state.files).toEqual([]);
     expect(state.selectedEngine).toBe('gemini');
+    expect(state.extractionMode).toBe('highlight');
     expect(state.globalStatus).toBe('idle');
   });
 
-  it('updates selected engine', () => {
-    useOcrStore.getState().setSelectedEngine('groq');
-    expect(useOcrStore.getState().selectedEngine).toBe('groq');
+  it('updates selected engine and extraction mode', () => {
+    useOcrStore.getState().setSelectedEngine('paddle');
+    useOcrStore.getState().setExtractionMode('full');
+    expect(useOcrStore.getState().selectedEngine).toBe('paddle');
+    expect(useOcrStore.getState().extractionMode).toBe('full');
   });
 
-  it('updates font size', () => {
-    useOcrStore.getState().setFontSize(18);
-    expect(useOcrStore.getState().fontSize).toBe(18);
+  it('clamps and updates font size', () => {
+    useOcrStore.getState().setFontSize(20);
+    expect(useOcrStore.getState().fontSize).toBe(20);
+    useOcrStore.getState().setFontSize(99);
+    expect(useOcrStore.getState().fontSize).toBe(28);
   });
 
   it('adds valid image files and assigns activeFileId', () => {
@@ -70,34 +76,47 @@ describe('useOcrStore', () => {
     expect(useOcrStore.getState().files).toHaveLength(0);
   });
 
-  it('rehydrates cached text using engine-specific cache key', () => {
+  it('rehydrates cached text using engine + mode cache key and rebinds when switching mode', () => {
     const fakeFile = new File(['data'], 'doc.png', { type: 'image/png' });
+    const highlightKey = buildCacheKey(fakeFile, 'groq', 'highlight');
+    const fullKey = buildCacheKey(fakeFile, 'groq', 'full');
 
-    // Seed cache for groq engine
     useOcrStore.setState({
       selectedEngine: 'groq',
+      extractionMode: 'highlight',
       textCache: {
-        'groq::doc.png::4': 'Texto completo transcripto por Groq',
+        [highlightKey]: 'Frase resaltada en amarillo',
+        [fullKey]: 'Página entera transcripta por Groq',
       },
     });
 
     useOcrStore.getState().addFiles([fakeFile]);
-    const fileEntry = useOcrStore.getState().files[0];
+    expect(useOcrStore.getState().files[0].status).toBe('success');
+    expect(useOcrStore.getState().files[0].resultText).toBe('Frase resaltada en amarillo');
 
-    expect(fileEntry.status).toBe('success');
-    expect(fileEntry.resultText).toBe('Texto completo transcripto por Groq');
+    // Al cambiar a modo 'full', se rehidrata automáticamente la transcripción completa cacheada
+    useOcrStore.getState().setExtractionMode('full');
+    expect(useOcrStore.getState().files[0].status).toBe('success');
+    expect(useOcrStore.getState().files[0].resultText).toBe('Página entera transcripta por Groq');
+
+    // Al cambiar a un motor sin caché para esa foto ('paddle'), pasa a 'idle' listo para procesar
+    useOcrStore.getState().setSelectedEngine('paddle');
+    expect(useOcrStore.getState().files[0].status).toBe('idle');
+    expect(useOcrStore.getState().files[0].resultText).toBeUndefined();
   });
 
-  it('updates file result and updates engine-aware cache', () => {
+  it('updates file result, rotates preview, and updates engine+mode-aware cache', () => {
     const fakeFile = new File(['data'], 'doc.png', { type: 'image/png' });
     useOcrStore.getState().addFiles([fakeFile]);
     const fileId = useOcrStore.getState().files[0].id;
 
     useOcrStore.getState().updateFileResult(fileId, 'Nuevo texto editado');
+    useOcrStore.getState().rotateFilePreview(fileId);
 
     const state = useOcrStore.getState();
     expect(state.files[0].resultText).toBe('Nuevo texto editado');
-    expect(state.textCache['gemini::doc.png::4']).toBe('Nuevo texto editado');
+    expect(state.files[0].rotationDeg).toBe(90);
+    expect(state.textCache['gemini::highlight::doc.png::4']).toBe('Nuevo texto editado');
   });
 });
 

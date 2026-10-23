@@ -34,11 +34,11 @@ export function KawaiiModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="w-full max-w-sm bg-white rounded-[2.5rem] shadow-2xl border-4 border-pink-100 overflow-hidden p-0 duration-300">
+      <DialogContent className="w-full max-w-sm bg-white dark:bg-zinc-900 rounded-[2.5rem] shadow-2xl border-4 border-pink-100 dark:border-pink-950/80 overflow-hidden p-0 duration-300">
         <div className="px-8 pt-12 pb-8 flex flex-col items-center text-center">
           <div
             className={`w-20 h-20 rounded-full flex items-center justify-center mb-6 animate-bounce relative ${
-              isDanger ? 'bg-rose-100' : 'bg-pink-100'
+              isDanger ? 'bg-rose-100 dark:bg-rose-950/70' : 'bg-pink-100 dark:bg-pink-950/70'
             }`}
           >
             {mascotType === 'panda' ? (
@@ -54,7 +54,9 @@ export function KawaiiModal({
           </div>
 
           <DialogTitle
-            className={`text-2xl font-black mb-3 ${isDanger ? 'text-rose-600' : 'text-pink-600'}`}
+            className={`text-2xl font-black mb-3 ${
+              isDanger ? 'text-rose-600 dark:text-rose-400' : 'text-pink-600 dark:text-pink-300'
+            }`}
           >
             {title}
           </DialogTitle>
@@ -66,8 +68,8 @@ export function KawaiiModal({
               onClick={onConfirm}
               className={`w-full py-4 rounded-3xl font-black text-lg shadow-lg btn-bounce transition-all ${
                 isDanger
-                  ? 'bg-rose-500 hover:bg-rose-600 text-white shadow-rose-200'
-                  : 'bg-pink-400 hover:bg-pink-500 text-white shadow-pink-200'
+                  ? 'bg-rose-500 hover:bg-rose-600 text-white shadow-rose-200 dark:shadow-none'
+                  : 'bg-pink-400 hover:bg-pink-500 text-white shadow-pink-200 dark:shadow-none'
               }`}
             >
               <div className="flex items-center justify-center gap-2">
@@ -77,14 +79,18 @@ export function KawaiiModal({
             </button>
             <button
               onClick={onClose}
-              className="w-full py-3 rounded-3xl font-extrabold text-zinc-400 hover:text-zinc-600 hover:bg-zinc-50 transition-all"
+              className="w-full py-3 rounded-3xl font-extrabold text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-all"
             >
               {cancelText}
             </button>
           </div>
         </div>
 
-        <div className={`h-3 w-full ${isDanger ? 'bg-rose-100' : 'bg-pink-100'}`} />
+        <div
+          className={`h-3 w-full ${
+            isDanger ? 'bg-rose-100 dark:bg-rose-950' : 'bg-pink-100 dark:bg-pink-950'
+          }`}
+        />
       </DialogContent>
     </Dialog>
   );

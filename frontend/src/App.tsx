@@ -69,7 +69,11 @@ export default function App() {
             hasFiles ? 'max-w-[1400px] pb-3' : 'max-w-[1200px] pb-12'
           }`}
         >
-          <div className="relative z-10 w-full flex flex-col flex-1 h-full shadow-2xl rounded-3xl">
+          <div
+            className={`relative z-10 w-full flex flex-col flex-1 h-full ${
+              hasFiles ? 'shadow-2xl rounded-3xl' : ''
+            }`}
+          >
             {hasFiles ? (
               <Suspense fallback={<WorkspaceFallback />}>
                 <OcrWorkspace />

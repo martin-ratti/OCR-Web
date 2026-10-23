@@ -1,14 +1,22 @@
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
-import { ExtractResponseSchema } from '@ocr-web/shared';
-import { isRateLimitMessage, isUpstreamBusyMessage, processOcr, type OcrEngine } from '../shared/api';
+import { persist, createJSONStorage, type StateStorage } from 'zustand/middleware';
+import {
+  ExtractResponseSchema,
+  NO_HIGHLIGHT_SENTINEL,
+  type OcrBox,
+  type OcrEngine,
+  type OcrMode,
+} from '@ocr-web/shared';
+import { isRateLimitMessage, isUpstreamBusyMessage, processOcr } from '../shared/api';
 import { downscaleImage } from '../lib/imageDownscale';
-import { recognizeLocal } from '../lib/tesseractAdapter';
+import { recognizeLocal } from '../lib/paddleAdapter';
+import { checkBlobHasHighlight } from '../lib/highlightDetector';
+import { cleanOcrText } from '../lib/textFormatters';
 
 export type OcrStatus = 'idle' | 'processing' | 'success' | 'error';
 
-// Backend multer cap: 5 MB. Keep in sync with backend/src/middlewares/upload.ts.
 export const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
+const MAX_CACHE_ENTRIES = 250;
 
 export interface AddFilesResult {
   acceptedCount: number;
@@ -26,6 +34,9 @@ export interface OcrFile {
   errorMessage?: string;
   infoMessage?: string;
   compressed?: File;
+  boxes?: OcrBox[];
+  rotationDeg?: 0 | 90 | 180 | 270;
+  quotaSaved?: boolean;
 }
 
 interface UndoSnapshot {
@@ -40,8 +51,10 @@ interface OcrState {
   globalStatus: 'idle' | 'working' | 'done';
   globalProgress: number;
   selectedEngine: OcrEngine;
+  extractionMode: OcrMode;
   fontSize: number;
   textCache: Record<string, string>;
+  quotaSavedCount: number;
   lastClearedSnapshot: UndoSnapshot | null;
 
   addFiles: (files: File[]) => AddFilesResult;
@@ -50,10 +63,13 @@ interface OcrState {
   clearAll: () => void;
   restoreCleared: () => boolean;
   setSelectedEngine: (engine: OcrEngine) => void;
+  setExtractionMode: (mode: OcrMode) => void;
   setFontSize: (size: number) => void;
+  rotateFilePreview: (id: string) => void;
 
   processAll: () => Promise<void>;
   processOne: (id: string) => Promise<void>;
+  processOneFullPage: (id: string) => Promise<void>;
   forceRetry: (id: string) => Promise<void>;
   retryAllErrors: () => Promise<void>;
   processSelected: (ids: string[]) => Promise<void>;
@@ -65,114 +81,246 @@ interface OcrState {
 }
 
 const MAX_FILES = 200;
-// Pausa entre archivos por motor. Mínimo teórico (60s / RPM):
-// Gemini free = 15 RPM → 4s. Usamos 5s con margen para clock drift y latencia variable.
-// Groq free = 30 RPM → 2s. Usamos 2.5s con el mismo razonamiento.
-// Paddle/Tesseract local = 0 (no cuota).
-// 6s (antes 5s): Gemini flash free tier es ~10 RPM. A 5s eventualmente chocaba
-// con el límite por minuto y disparaba 429s en lotes largos. 6s da margen.
-const INTER_FILE_DELAY_MS = 6000;
-// 2s (antes 2.5s): Groq free tier es 30 RPM → 2s por request es seguro y
-// procesamos un 20% más de imágenes por minuto.
+const INTER_FILE_DELAY_GEMINI_MS = 4200;
 const INTER_FILE_DELAY_GROQ_MS = 2000;
 const MAX_ATTEMPTS = 5;
-// Tope de reintentos SOLO para saturación/timeout del modelo (UpstreamBusy /
-// 504). Un timeout que se repite no se arregla insistiendo: 2 reintentos cortos
-// y se reporta el error. Esto evita que Groq quede "cargando" varios minutos
-// acumulando timeouts de 45s (bug reportado). La cuota agotada (RateLimit) y los
-// errores genéricos siguen usando MAX_ATTEMPTS.
 const MAX_BUSY_ATTEMPTS = 3;
 const UNDO_TTL_MS = 12_000;
 
 let abortController: AbortController | null = null;
 let cancelled = false;
 
-function cacheKey(f: File, engine: OcrEngine = 'gemini'): string {
-  return `${engine}::${f.name}::${f.size}`;
+export function buildCacheKey(
+  f: Pick<File, 'name' | 'size'>,
+  engine: OcrEngine = 'gemini',
+  mode: OcrMode = 'highlight'
+): string {
+  return `${engine}::${mode}::${f.name}::${f.size}`;
 }
 
-async function ensureCompressed(state: OcrState, fileId: string): Promise<File> {
+function fileDedupeKey(f: Pick<File, 'name' | 'size'>): string {
+  return `${f.name}::${f.size}`;
+}
+
+function lookupCache(
+  cache: Record<string, string>,
+  f: Pick<File, 'name' | 'size'>,
+  engine: OcrEngine,
+  mode: OcrMode
+): string | undefined {
+  const exact = cache[buildCacheKey(f, engine, mode)];
+  if (exact !== undefined) return exact;
+  if (mode === 'highlight') {
+    const legacyEngine = cache[`${engine}::${f.name}::${f.size}`];
+    if (legacyEngine !== undefined) return legacyEngine;
+  }
+  return undefined;
+}
+
+function putInBoundedCache(
+  cache: Record<string, string>,
+  key: string,
+  value: string
+): Record<string, string> {
+  const next = { ...cache };
+  if (key in next) delete next[key];
+  next[key] = value;
+  const keys = Object.keys(next);
+  if (keys.length > MAX_CACHE_ENTRIES) {
+    const excess = keys.length - MAX_CACHE_ENTRIES;
+    for (let i = 0; i < excess; i++) {
+      delete next[keys[i]];
+    }
+  }
+  return next;
+}
+
+function rebindFilesToSelection(
+  files: OcrFile[],
+  cache: Record<string, string>,
+  engine: OcrEngine,
+  mode: OcrMode
+): OcrFile[] {
+  return files.map((item) => {
+    if (item.status === 'processing') return item;
+    const cached = lookupCache(cache, item.file, engine, mode);
+    if (cached !== undefined) {
+      return {
+        ...item,
+        status: 'success',
+        resultText: cached,
+        errorMessage: undefined,
+        infoMessage: undefined,
+        quotaSaved: false,
+      };
+    }
+    return {
+      ...item,
+      status: 'idle',
+      resultText: undefined,
+      errorMessage: undefined,
+      infoMessage: undefined,
+      quotaSaved: false,
+    };
+  });
+}
+
+async function ensureCompressed(
+  state: OcrState,
+  fileId: string,
+  engine: OcrEngine
+): Promise<File> {
   const target = state.files.find((f) => f.id === fileId);
   if (!target) throw new Error('File not found');
-  if (target.compressed) return target.compressed;
-  const c = await downscaleImage(target.file);
-  return c;
+  if (target.compressed && engine !== 'groq') return target.compressed;
+  return downscaleImage(target.file, {
+    target: engine === 'paddle' ? 'local' : 'cloud',
+    rotationDeg: engine === 'paddle' ? 0 : target.rotationDeg,
+    autoUprightSideways: engine === 'groq',
+  });
 }
 
 type SetState = {
   (partial: Partial<OcrState> | ((s: OcrState) => Partial<OcrState>)): void;
 };
 
+interface ExtractOutcome {
+  usedNetwork: boolean;
+}
+
 async function extractOneWithRetries(
-  store: OcrState,
+  getState: () => OcrState,
   setState: SetState,
   fileId: string,
   signal: AbortSignal,
-): Promise<void> {
-  const target = store.files.find((f) => f.id === fileId);
-  if (!target) return;
+  opts: { modeOverride?: OcrMode; skipColorPrecheck?: boolean } = {}
+): Promise<ExtractOutcome> {
+  const initialState = getState();
+  const target = initialState.files.find((f) => f.id === fileId);
+  if (!target) return { usedNetwork: false };
+
+  const engine = initialState.selectedEngine;
+  const mode = opts.modeOverride ?? initialState.extractionMode;
 
   setState((s) => ({
     files: s.files.map((f) =>
       f.id === fileId
-        ? { ...f, status: 'processing', errorMessage: undefined, infoMessage: undefined }
-        : f,
+        ? {
+            ...f,
+            status: 'processing',
+            errorMessage: undefined,
+            infoMessage: undefined,
+            quotaSaved: false,
+          }
+        : f
     ),
   }));
 
-  const compressed = target.compressed ?? (await downscaleImage(target.file));
-  if (!target.compressed) {
-    setState((s) => ({
-      files: s.files.map((f) => (f.id === fileId ? { ...f, compressed } : f)),
-    }));
+  let compressed: File | null = null;
+  if (engine !== 'paddle') {
+    const needsFreshTransform = engine === 'groq' || Boolean(target.rotationDeg);
+    compressed =
+      !needsFreshTransform && target.compressed
+        ? target.compressed
+        : await downscaleImage(target.file, {
+            target: 'cloud',
+            rotationDeg: target.rotationDeg,
+            autoUprightSideways: engine === 'groq',
+          });
+
+    if (!target.compressed && !needsFreshTransform) {
+      setState((s) => ({
+        files: s.files.map((f) => (f.id === fileId ? { ...f, compressed: compressed ?? undefined } : f)),
+      }));
+    }
+  }
+
+  // Zero-Quota Waste: si el usuario pide SOLO resaltado en un motor con cuota (Gemini/Groq)
+  // y la página no tiene ni una sola celda con color de marcador, evitamos gastar cuota de API.
+  if (engine !== 'paddle' && compressed && mode === 'highlight' && !opts.skipColorPrecheck) {
+    const hasHighlight = await checkBlobHasHighlight(compressed);
+    if (signal.aborted) return { usedNetwork: false };
+    if (!hasHighlight) {
+      const sentinel = NO_HIGHLIGHT_SENTINEL;
+      setState((s) => ({
+        quotaSavedCount: s.quotaSavedCount + 1,
+        files: s.files.map((f) =>
+          f.id === fileId
+            ? {
+                ...f,
+                status: 'success',
+                resultText: sentinel,
+                errorMessage: undefined,
+                infoMessage: undefined,
+                quotaSaved: true,
+              }
+            : f
+        ),
+        textCache: putInBoundedCache(
+          s.textCache,
+          buildCacheKey(target.file, engine, mode),
+          sentinel
+        ),
+      }));
+      return { usedNetwork: false };
+    }
   }
 
   let attempt = 0;
   while (attempt < MAX_ATTEMPTS) {
-    if (signal.aborted) return;
+    if (signal.aborted) return { usedNetwork: false };
 
     try {
       let text: string;
-      if (store.selectedEngine === 'paddle') {
-        // Local engine runs entirely in the browser via tesseract.js — no
-        // HTTP, no Render, no Gemini quota burn. Aborting mid-recognition is
-        // not natively supported by tesseract.js, but each image is short
-        // enough (<10 s on a typical laptop) that we just let the in-flight
-        // call settle and check the signal afterwards.
-        text = await recognizeLocal(compressed);
-        if (signal.aborted) return;
+      let boxes: OcrBox[] | undefined;
+      let autoRot: 0 | 90 | 180 | 270 | undefined;
+
+      if (engine === 'paddle') {
+        const localRes = await recognizeLocal(target.file, mode);
+        if (signal.aborted) return { usedNetwork: false };
+        text = localRes.text;
+        boxes = localRes.boxes;
+        autoRot = localRes.rotationDeg;
       } else {
-        const res = await processOcr(compressed, compressed.name, store.selectedEngine, signal);
+        if (!compressed) throw new Error('Error al preparar la imagen');
+        const res = await processOcr(compressed, compressed.name, engine, mode, signal);
         const rawJson = await res.json().catch(() => null);
         const parsed = rawJson ? ExtractResponseSchema.safeParse(rawJson) : null;
         const body = parsed?.success ? parsed.data : null;
 
         if (!res.ok || body?.status === 'error') {
           const errMsg = body?.warnings?.[0] ?? res.statusText ?? 'Error desconocido';
-          // 429 = quota agotada (backoff largo, mensaje "agotada"). 503/502/504 =
-          // saturación temporal del modelo (backoff corto, mensaje "saturado").
-          // Antes el 503 caía a "Unhandled" en el server (500) y el cliente no
-          // reintentaba; ahora el server devuelve 503 y entra acá.
           if (res.status === 429 || isRateLimitMessage(errMsg)) {
             throw new Error('RateLimit');
           }
-          if (res.status === 503 || res.status === 502 || res.status === 504 || isUpstreamBusyMessage(errMsg)) {
+          if (
+            res.status === 503 ||
+            res.status === 502 ||
+            res.status === 504 ||
+            isUpstreamBusyMessage(errMsg)
+          ) {
             throw new Error('UpstreamBusy');
           }
           throw new Error(errMsg);
         }
         if (!body) throw new Error('Respuesta inválida del servidor');
-        text = body.text;
+        text =
+          body.text === NO_HIGHLIGHT_SENTINEL || body.text === 'Sin texto legible en la imagen.'
+            ? body.text
+            : cleanOcrText(body.text);
       }
-      // Si se canceló entre que llegó la respuesta y este punto, no resucitamos
-      // el archivo a 'success': cancel() ya lo devolvió a 'idle'. El cache sí lo
-      // guardamos igual (el texto es válido y ahorra una llamada futura).
+
       if (signal.aborted) {
         setState((s) => ({
-          textCache: { ...s.textCache, [cacheKey(target.file, s.selectedEngine)]: text },
+          textCache: putInBoundedCache(
+            s.textCache,
+            buildCacheKey(target.file, engine, mode),
+            text
+          ),
         }));
-        return;
+        return { usedNetwork: engine !== 'paddle' };
       }
+
       setState((s) => ({
         files: s.files.map((f) =>
           f.id === fileId
@@ -180,35 +328,32 @@ async function extractOneWithRetries(
                 ...f,
                 status: 'success',
                 resultText: text,
+                boxes: boxes ?? f.boxes,
+                rotationDeg: autoRot !== undefined ? autoRot : f.rotationDeg,
                 errorMessage: undefined,
                 infoMessage: undefined,
+                quotaSaved: false,
               }
-            : f,
+            : f
         ),
-        textCache: { ...s.textCache, [cacheKey(target.file, s.selectedEngine)]: text },
+        textCache: putInBoundedCache(
+          s.textCache,
+          buildCacheKey(target.file, engine, mode),
+          text
+        ),
       }));
-      return;
+      return { usedNetwork: engine !== 'paddle' };
     } catch (err: unknown) {
-      if (signal.aborted) return;
+      if (signal.aborted) return { usedNetwork: engine !== 'paddle' };
 
       const e = err as Error;
-      if (e.name === 'AbortError') return;
+      if (e.name === 'AbortError') return { usedNetwork: engine !== 'paddle' };
 
       attempt++;
       const isRate = e.message === 'RateLimit';
       const isBusy = e.message === 'UpstreamBusy';
-      // Local engine errors are deterministic (model load failure, OOM, image
-      // decode error). Retrying with backoff would just stall the queue on
-      // the same failure five times. Fail fast.
-      //
-      // 429 (rate) y 5xx (busy) cortan antes (MAX_BUSY_ATTEMPTS). El 429 de Groq
-      // suele ser cuota DIARIA de tokens agotada ("try again in 22m"), no un
-      // burst de RPM: insistir 5 veces con backoff de 15·n s solo dejaba la UI
-      // "cargando" >2 min sin chance de éxito (bug reportado). 2 reintentos
-      // cortos cubren un burst momentáneo; si es cuota dura, falla rápido con
-      // mensaje claro. Solo los errores genéricos usan MAX_ATTEMPTS.
       const attemptCap = isRate || isBusy ? MAX_BUSY_ATTEMPTS : MAX_ATTEMPTS;
-      const canRetry = store.selectedEngine !== 'paddle' && attempt < attemptCap;
+      const canRetry = engine !== 'paddle' && attempt < attemptCap;
 
       if (!canRetry) {
         setState((s) => ({
@@ -218,22 +363,19 @@ async function extractOneWithRetries(
                   ...f,
                   status: 'error',
                   errorMessage: isRate
-                    ? 'Límite de la IA alcanzado. La cuota gratuita se agotó. Probá más tarde.'
+                    ? 'Cuota gratuita agotada en este motor. Cambiá a Groq o al motor Local (PP-OCRv6 sin cuota).'
                     : isBusy
-                      ? 'El modelo de IA está saturado. Probá de nuevo en unos minutos o usá el motor local.'
+                      ? 'El modelo en la nube está saturado. Probá de nuevo o cambiá al motor Local.'
                       : e.message || 'Error desconocido',
                   infoMessage: undefined,
                 }
-              : f,
+              : f
           ),
         }));
-        return;
+        return { usedNetwork: engine !== 'paddle' };
       }
 
-      // Backoff diferenciado: cuota/saturación (8·n s) > genérico (3·n s). Antes
-      // el rate usaba 15·n: con el cap viejo de 5 intentos sumaba 150s de espera
-      // pura. Con 8·n y 2 reintentos son ~24s máx antes de reportar el error.
-      const waitSec = isRate || isBusy ? attempt * 8 : attempt * 3;
+      const waitSec = isRate || isBusy ? attempt * 7 : attempt * 3;
       const maxShown = attemptCap - 1;
       setState((s) => ({
         files: s.files.map((f) =>
@@ -241,12 +383,12 @@ async function extractOneWithRetries(
             ? {
                 ...f,
                 infoMessage: isRate
-                  ? `La IA está a mil. Esperando ${waitSec}s (intento ${attempt}/${maxShown})...`
+                  ? `Cuidando cuota IA, esperando ${waitSec}s (intento ${attempt}/${maxShown})...`
                   : isBusy
-                    ? `Modelo saturado, reintentando en ${waitSec}s (intento ${attempt}/${maxShown})...`
+                    ? `Modelo ocupado, reintentando en ${waitSec}s (intento ${attempt}/${maxShown})...`
                     : `Reintentando en ${waitSec}s (intento ${attempt}/${maxShown})...`,
               }
-            : f,
+            : f
         ),
       }));
 
@@ -258,12 +400,50 @@ async function extractOneWithRetries(
             clearTimeout(t);
             reject(new DOMException('aborted', 'AbortError'));
           },
-          { once: true },
+          { once: true }
         );
       }).catch(() => {});
     }
   }
+
+  return { usedNetwork: engine !== 'paddle' };
 }
+
+const memoryFallback = new Map<string, string>();
+const safeLocalStorage: StateStorage = {
+  getItem: (name) => {
+    try {
+      if (typeof window !== 'undefined' && typeof window.localStorage?.getItem === 'function') {
+        return window.localStorage.getItem(name);
+      }
+    } catch {
+      /* ignore restricted storage */
+    }
+    return memoryFallback.get(name) ?? null;
+  },
+  setItem: (name, value) => {
+    try {
+      if (typeof window !== 'undefined' && typeof window.localStorage?.setItem === 'function') {
+        window.localStorage.setItem(name, value);
+        return;
+      }
+    } catch {
+      /* QuotaExceededError or private mode */
+    }
+    memoryFallback.set(name, value);
+  },
+  removeItem: (name) => {
+    try {
+      if (typeof window !== 'undefined' && typeof window.localStorage?.removeItem === 'function') {
+        window.localStorage.removeItem(name);
+        return;
+      }
+    } catch {
+      /* ignore */
+    }
+    memoryFallback.delete(name);
+  },
+};
 
 export const useOcrStore = create<OcrState>()(
   persist(
@@ -273,23 +453,47 @@ export const useOcrStore = create<OcrState>()(
       globalStatus: 'idle',
       globalProgress: 0,
       selectedEngine: 'gemini',
+      extractionMode: 'highlight',
       fontSize: 16,
       textCache: {},
+      quotaSavedCount: 0,
       lastClearedSnapshot: null,
 
-      setSelectedEngine: (engine) => set({ selectedEngine: engine }),
+      setSelectedEngine: (engine) =>
+        set((s) => ({
+          selectedEngine: engine,
+          globalStatus: s.globalStatus === 'working' ? s.globalStatus : 'idle',
+          files: rebindFilesToSelection(s.files, s.textCache, engine, s.extractionMode),
+        })),
+
+      setExtractionMode: (mode) =>
+        set((s) => ({
+          extractionMode: mode,
+          globalStatus: s.globalStatus === 'working' ? s.globalStatus : 'idle',
+          files: rebindFilesToSelection(s.files, s.textCache, s.selectedEngine, mode),
+        })),
+
       setFontSize: (size) => set({ fontSize: Math.min(28, Math.max(12, Math.round(size))) }),
+
+      rotateFilePreview: (id) =>
+        set((s) => ({
+          files: s.files.map((f) => {
+            if (f.id !== id) return f;
+            const nextDeg = (((f.rotationDeg ?? 0) + 90) % 360) as 0 | 90 | 180 | 270;
+            return { ...f, rotationDeg: nextDeg, compressed: undefined };
+          }),
+        })),
 
       addFiles: (newFiles) => {
         const state = get();
-        const existingKeys = new Set(state.files.map((f) => cacheKey(f.file)));
+        const existingKeys = new Set(state.files.map((f) => fileDedupeKey(f.file)));
         const duplicates: string[] = [];
         const oversized: string[] = [];
         const seenInBatch = new Set<string>();
         const valid: File[] = [];
 
         for (const f of newFiles) {
-          const key = cacheKey(f);
+          const key = fileDedupeKey(f);
           if (f.size > MAX_FILE_SIZE_BYTES) {
             oversized.push(f.name);
             continue;
@@ -309,14 +513,12 @@ export const useOcrStore = create<OcrState>()(
         if (accepted.length > 0) {
           set((s) => {
             const ocrFiles: OcrFile[] = accepted.map((f) => {
-              const cached =
-                s.textCache[cacheKey(f, s.selectedEngine)] ??
-                s.textCache[`${f.name}::${f.size}`];
+              const cached = lookupCache(s.textCache, f, s.selectedEngine, s.extractionMode);
               return {
                 id: crypto.randomUUID(),
                 file: f,
                 previewUrl: URL.createObjectURL(f),
-                status: cached ? 'success' : 'idle',
+                status: cached !== undefined ? 'success' : 'idle',
                 resultText: cached,
               };
             });
@@ -348,7 +550,7 @@ export const useOcrStore = create<OcrState>()(
           return {
             files: remaining,
             activeFileId:
-              state.activeFileId === id ? remaining[0]?.id ?? null : state.activeFileId,
+              state.activeFileId === id ? (remaining[0]?.id ?? null) : state.activeFileId,
           };
         }),
 
@@ -407,7 +609,11 @@ export const useOcrStore = create<OcrState>()(
         set((state) => {
           const target = state.files.find((f) => f.id === id);
           const newCache = target
-            ? { ...state.textCache, [cacheKey(target.file, state.selectedEngine)]: text }
+            ? putInBoundedCache(
+                state.textCache,
+                buildCacheKey(target.file, state.selectedEngine, state.extractionMode),
+                text
+              )
             : state.textCache;
           return {
             files: state.files.map((f) => (f.id === id ? { ...f, resultText: text } : f)),
@@ -419,17 +625,13 @@ export const useOcrStore = create<OcrState>()(
         cancelled = true;
         abortController?.abort();
         abortController = null;
-        // Cualquier archivo que quedó en 'processing' al cancelar NO terminó:
-        // lo devolvemos a 'idle' para que no quede el spinner fantasma y para
-        // que vuelva a ser elegible en el próximo "¡DALAAAA!". Sin esto el
-        // badge "Procesando 1/N" seguía girando para siempre (bug reportado).
         set((s) => ({
           globalStatus: 'idle',
           globalProgress: 0,
           files: s.files.map((f) =>
             f.status === 'processing'
               ? { ...f, status: 'idle', infoMessage: undefined }
-              : f,
+              : f
           ),
         }));
       },
@@ -439,11 +641,19 @@ export const useOcrStore = create<OcrState>()(
         abortController = ac;
         cancelled = false;
         set({ globalStatus: 'working' });
-        const state = get();
-        await extractOneWithRetries(state, set, id, ac.signal);
-        // Solo marcamos 'done' si esta corrida no fue abortada/cancelada. Usamos
-        // el signal local (no el module-level) para no pisar el estado de una
-        // corrida posterior que ya tomó el abortController.
+        await extractOneWithRetries(get, set, id, ac.signal, { skipColorPrecheck: true });
+        if (!ac.signal.aborted && !cancelled) set({ globalStatus: 'done' });
+      },
+
+      processOneFullPage: async (id) => {
+        const ac = new AbortController();
+        abortController = ac;
+        cancelled = false;
+        set({ globalStatus: 'working' });
+        await extractOneWithRetries(get, set, id, ac.signal, {
+          modeOverride: 'full',
+          skipColorPrecheck: true,
+        });
         if (!ac.signal.aborted && !cancelled) set({ globalStatus: 'done' });
       },
 
@@ -451,11 +661,11 @@ export const useOcrStore = create<OcrState>()(
         const target = get().files.find((f) => f.id === id);
         if (!target) return;
         set((s) => {
-          const keyWithEngine = cacheKey(target.file, s.selectedEngine);
-          const legacyKey = `${target.file.name}::${target.file.size}`;
+          const exactKey = buildCacheKey(target.file, s.selectedEngine, s.extractionMode);
+          const legacyEngineKey = `${s.selectedEngine}::${target.file.name}::${target.file.size}`;
           const nextCache = { ...s.textCache };
-          delete nextCache[keyWithEngine];
-          delete nextCache[legacyKey];
+          delete nextCache[exactKey];
+          delete nextCache[legacyEngineKey];
           return {
             textCache: nextCache,
             files: s.files.map((f) =>
@@ -466,8 +676,9 @@ export const useOcrStore = create<OcrState>()(
                     resultText: undefined,
                     errorMessage: undefined,
                     infoMessage: undefined,
+                    quotaSaved: false,
                   }
-                : f,
+                : f
             ),
           };
         });
@@ -488,32 +699,33 @@ export const useOcrStore = create<OcrState>()(
         for (let i = 0; i < toProcess.length; i++) {
           if (signal.aborted || cancelled) break;
 
+          const currentEngine = get().selectedEngine;
           const nextId = toProcess[i + 1]?.id;
-          const prewarm = nextId
-            ? ensureCompressed(get(), nextId)
-                .then((c) =>
-                  set((s) => ({
-                    files: s.files.map((f) => (f.id === nextId ? { ...f, compressed: c } : f)),
-                  })),
-                )
-                .catch(() => {})
-            : Promise.resolve();
+          const prewarm =
+            nextId && currentEngine !== 'paddle'
+              ? ensureCompressed(get(), nextId, currentEngine)
+                  .then((c) =>
+                    set((s) => ({
+                      files: s.files.map((f) => (f.id === nextId ? { ...f, compressed: c } : f)),
+                    }))
+                  )
+                  .catch(() => {})
+              : Promise.resolve();
 
-          await extractOneWithRetries(get(), set, toProcess[i].id, signal);
+          const outcome = await extractOneWithRetries(get, set, toProcess[i].id, signal);
 
           const processedCount = i + 1;
           set({ globalProgress: Math.round((processedCount / toProcess.length) * 100) });
 
           if (i < toProcess.length - 1 && !signal.aborted) {
-            // 5 s inter-file pause exists to keep us under Gemini's 15 RPM
-            // free-tier ceiling. The local engine has no per-minute quota,
-            // so we only pay the cost of `prewarm` between images.
-            const interFileDelay =
-              get().selectedEngine === 'paddle'
+            const interFileDelay = !outcome.usedNetwork
+              ? 0
+              : get().selectedEngine === 'paddle'
                 ? 0
                 : get().selectedEngine === 'groq'
                   ? INTER_FILE_DELAY_GROQ_MS
-                  : INTER_FILE_DELAY_MS;
+                  : INTER_FILE_DELAY_GEMINI_MS;
+
             await Promise.all([
               prewarm,
               interFileDelay === 0
@@ -526,23 +738,19 @@ export const useOcrStore = create<OcrState>()(
                         clearTimeout(t);
                         resolve();
                       },
-                      { once: true },
+                      { once: true }
                     );
                   }),
             ]);
           }
         }
 
-        // Si se canceló, cancel() ya dejó globalStatus en 'idle' y limpió los
-        // 'processing'. No lo pisamos con 'done' (eso reactivaba el spinner).
         if (!cancelled && !signal.aborted) set({ globalStatus: 'done' });
       },
 
       retryAllErrors: async () => {
         const errored = get().files.filter((f) => f.status === 'error');
         if (errored.length === 0) return;
-        // Reprocesar SOLO los que están en error, no los 'idle' sin tocar.
-        // Antes esto llamaba a processAll() que barría idle+error juntos.
         await get().processSelected(errored.map((f) => f.id));
       },
 
@@ -569,7 +777,7 @@ export const useOcrStore = create<OcrState>()(
             files: remaining,
             activeFileId:
               state.activeFileId && idSet.has(state.activeFileId)
-                ? remaining[0]?.id ?? null
+                ? (remaining[0]?.id ?? null)
                 : state.activeFileId,
           };
         }),
@@ -588,7 +796,7 @@ export const useOcrStore = create<OcrState>()(
                   errorMessage: undefined,
                   infoMessage: undefined,
                 }
-              : f,
+              : f
           ),
         }));
 
@@ -601,32 +809,33 @@ export const useOcrStore = create<OcrState>()(
         for (let i = 0; i < toProcess.length; i++) {
           if (signal.aborted || cancelled) break;
 
+          const currentEngine = get().selectedEngine;
           const nextId = toProcess[i + 1]?.id;
-          const prewarm = nextId
-            ? ensureCompressed(get(), nextId)
-                .then((c) =>
-                  set((s) => ({
-                    files: s.files.map((f) => (f.id === nextId ? { ...f, compressed: c } : f)),
-                  })),
-                )
-                .catch(() => {})
-            : Promise.resolve();
+          const prewarm =
+            nextId && currentEngine !== 'paddle'
+              ? ensureCompressed(get(), nextId, currentEngine)
+                  .then((c) =>
+                    set((s) => ({
+                      files: s.files.map((f) => (f.id === nextId ? { ...f, compressed: c } : f)),
+                    }))
+                  )
+                  .catch(() => {})
+              : Promise.resolve();
 
-          await extractOneWithRetries(get(), set, toProcess[i].id, signal);
+          const outcome = await extractOneWithRetries(get, set, toProcess[i].id, signal);
 
           const processedCount = i + 1;
           set({ globalProgress: Math.round((processedCount / toProcess.length) * 100) });
 
           if (i < toProcess.length - 1 && !signal.aborted) {
-            // 5 s inter-file pause exists to keep us under Gemini's 15 RPM
-            // free-tier ceiling. The local engine has no per-minute quota,
-            // so we only pay the cost of `prewarm` between images.
-            const interFileDelay =
-              get().selectedEngine === 'paddle'
+            const interFileDelay = !outcome.usedNetwork
+              ? 0
+              : get().selectedEngine === 'paddle'
                 ? 0
                 : get().selectedEngine === 'groq'
                   ? INTER_FILE_DELAY_GROQ_MS
-                  : INTER_FILE_DELAY_MS;
+                  : INTER_FILE_DELAY_GEMINI_MS;
+
             await Promise.all([
               prewarm,
               interFileDelay === 0
@@ -639,28 +848,39 @@ export const useOcrStore = create<OcrState>()(
                         clearTimeout(t);
                         resolve();
                       },
-                      { once: true },
+                      { once: true }
                     );
                   }),
             ]);
           }
         }
 
-        // Mismo guard que processAll: no pisar el 'idle' que dejó cancel().
         if (!cancelled && !signal.aborted) set({ globalStatus: 'done' });
       },
     }),
     {
       name: 'ocr-web-state',
-      version: 4,
-      storage: createJSONStorage(() => localStorage),
+      version: 6,
+      storage: createJSONStorage(() => safeLocalStorage),
+      migrate: (persistedState: unknown, version: number) => {
+        const prev = (persistedState ?? {}) as Partial<OcrState>;
+        // En v6 limpiamos textCache anterior (v1-v5) para purgar transcripciones previas
+        // al detector cuadrilátero, auto-rotación 270° y modelo latin_PP-OCRv5.
+        return {
+          selectedEngine: prev.selectedEngine ?? 'gemini',
+          extractionMode: prev.extractionMode ?? 'highlight',
+          fontSize: prev.fontSize ?? 16,
+          textCache: version < 6 ? {} : (prev.textCache ?? {}),
+        };
+      },
       partialize: (state) => ({
         selectedEngine: state.selectedEngine,
+        extractionMode: state.extractionMode,
         fontSize: state.fontSize,
         textCache: state.textCache,
       }),
-    },
-  ),
+    }
+  )
 );
 
 export const ocrSelectors = {
@@ -670,6 +890,8 @@ export const ocrSelectors = {
   globalStatus: (s: OcrState) => s.globalStatus,
   globalProgress: (s: OcrState) => s.globalProgress,
   selectedEngine: (s: OcrState) => s.selectedEngine,
+  extractionMode: (s: OcrState) => s.extractionMode,
+  quotaSavedCount: (s: OcrState) => s.quotaSavedCount,
   fontSize: (s: OcrState) => s.fontSize,
   hasUndo: (s: OcrState) => !!s.lastClearedSnapshot,
 };
