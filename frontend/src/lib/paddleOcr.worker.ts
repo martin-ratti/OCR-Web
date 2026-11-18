@@ -417,7 +417,7 @@ const PREFIXED_HEADING_RE =
 function formatSelectedEntries(entries: Array<{ box: PixelBox; text: string }>): string {
   if (entries.length === 0) return '';
 
-  const sorted = entries.slice().sort((a, b) => compareBoxesReadingOrder(a.box, b.box));
+  const sorted = entries.toSorted((a, b) => compareBoxesReadingOrder(a.box, b.box));
 
   const lines: Array<{
     box: PixelBox;

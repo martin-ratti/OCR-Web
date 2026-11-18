@@ -118,7 +118,7 @@ export function estimatePaperWhite(img: RgbaImage): PaperWhite {
   }
 
   const pick70 = (arr: number[]) => {
-    const s = arr.slice().sort((a, b) => a - b);
+    const s = arr.toSorted((a, b) => a - b);
     return s[Math.min(s.length - 1, Math.floor(s.length * 0.7))];
   };
 
