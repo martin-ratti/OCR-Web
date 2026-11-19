@@ -1,6 +1,10 @@
 import React, { useCallback, useRef, useState } from 'react';
 import { ocrSelectors, useOcrStore } from '../../../store/useOcrStore';
-import { reportAddFilesResult } from '../../../lib/addFilesFeedback';
+import {
+  FILE_INPUT_ACCEPT,
+  partitionSupportedImages,
+  reportAddFilesResult,
+} from '../../../lib/addFilesFeedback';
 import {
   Cpu,
   FileImage,
@@ -18,12 +22,6 @@ import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { KawaiiModal } from './KawaiiModal';
 import type { OcrEngine } from '@ocr-web/shared';
-
-function partitionImages(files: FileList | File[]): { images: File[]; rejected: number } {
-  const arr = Array.from(files);
-  const images = arr.filter((f) => f.type.startsWith('image/'));
-  return { images, rejected: arr.length - images.length };
-}
 
 const ENGINE_OPTIONS: { id: OcrEngine; label: string; hint: string; icon: React.ReactNode }[] = [
   {
@@ -74,14 +72,15 @@ export function OcrDropzone() {
       e.preventDefault();
       setIsDragging(false);
       if (e.dataTransfer.files?.length) {
-        const { images, rejected } = partitionImages(e.dataTransfer.files);
+        const { images, rejected, rejectedNames } = partitionSupportedImages(e.dataTransfer.files);
         if (images.length) {
           const result = addFiles(images);
-          reportAddFilesResult(result, rejected);
+          reportAddFilesResult(result, rejected, rejectedNames);
         } else if (rejected > 0) {
           reportAddFilesResult(
             { acceptedCount: 0, duplicates: [], oversized: [], capExceeded: 0 },
             rejected,
+            rejectedNames
           );
         }
       }
@@ -91,14 +90,15 @@ export function OcrDropzone() {
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      const { images, rejected } = partitionImages(e.target.files);
+      const { images, rejected, rejectedNames } = partitionSupportedImages(e.target.files);
       if (images.length) {
         const result = addFiles(images);
-        reportAddFilesResult(result, rejected);
+        reportAddFilesResult(result, rejected, rejectedNames);
       } else if (rejected > 0) {
         reportAddFilesResult(
           { acceptedCount: 0, duplicates: [], oversized: [], capExceeded: 0 },
           rejected,
+          rejectedNames
         );
       }
     }
@@ -107,11 +107,12 @@ export function OcrDropzone() {
 
   const handleFolderSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      const { images, rejected } = partitionImages(e.target.files);
+      const { images, rejected, rejectedNames } = partitionSupportedImages(e.target.files);
       if (rejected > 0) {
         reportAddFilesResult(
           { acceptedCount: 0, duplicates: [], oversized: [], capExceeded: 0 },
           rejected,
+          rejectedNames
         );
       }
       if (images.length > 0) {
@@ -280,7 +281,7 @@ export function OcrDropzone() {
         <input
           type="file"
           multiple
-          accept="image/*"
+          accept={FILE_INPUT_ACCEPT}
           ref={fileInputRef}
           onChange={handleFileSelect}
           className="hidden"

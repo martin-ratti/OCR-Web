@@ -8,8 +8,8 @@ import {
   type OcrMode,
 } from '@ocr-web/shared';
 import { isRateLimitMessage, isUpstreamBusyMessage, processOcr } from '../shared/api';
-import { downscaleImage } from '../lib/imageDownscale';
-import { recognizeLocal } from '../lib/paddleAdapter';
+import { buildCloudTransformKey, downscaleImage } from '../lib/imageDownscale';
+import { recognizeLocal, terminateLocalWorker } from '../lib/paddleAdapter';
 import { checkBlobHasHighlight } from '../lib/highlightDetector';
 import { cleanOcrText } from '../lib/textFormatters';
 
@@ -17,6 +17,7 @@ export type OcrStatus = 'idle' | 'processing' | 'success' | 'error';
 
 export const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
 const MAX_CACHE_ENTRIES = 250;
+const CACHE_WRITE_DEBOUNCE_MS = 300;
 
 export interface AddFilesResult {
   acceptedCount: number;
@@ -34,9 +35,11 @@ export interface OcrFile {
   errorMessage?: string;
   infoMessage?: string;
   compressed?: File;
+  compressedTransformKey?: string;
   boxes?: OcrBox[];
   rotationDeg?: 0 | 90 | 180 | 270;
   quotaSaved?: boolean;
+  modelUsed?: string;
 }
 
 interface UndoSnapshot {
@@ -50,6 +53,9 @@ interface OcrState {
   activeFileId: string | null;
   globalStatus: 'idle' | 'working' | 'done';
   globalProgress: number;
+  isProcessingBatch: boolean;
+  batchTotal: number;
+  batchCompleted: number;
   selectedEngine: OcrEngine;
   extractionMode: OcrMode;
   fontSize: number;
@@ -70,13 +76,14 @@ interface OcrState {
   processAll: () => Promise<void>;
   processOne: (id: string) => Promise<void>;
   processOneFullPage: (id: string) => Promise<void>;
+  processOneForceHighlightAi: (id: string) => Promise<void>;
   forceRetry: (id: string) => Promise<void>;
   retryAllErrors: () => Promise<void>;
   processSelected: (ids: string[]) => Promise<void>;
   removeFiles: (ids: string[]) => void;
   reorderFile: (fromId: string, toId: string) => void;
   cancel: () => void;
-  updateFileResult: (id: string, text: string) => void;
+  updateFileResult: (id: string, text: string, opts?: { immediateCache?: boolean }) => void;
   revokeAllPreviews: () => void;
 }
 
@@ -89,6 +96,8 @@ const UNDO_TTL_MS = 12_000;
 
 let abortController: AbortController | null = null;
 let cancelled = false;
+let cacheWriteTimer: ReturnType<typeof setTimeout> | null = null;
+const pendingCacheWrites = new Map<string, string>();
 
 export function buildCacheKey(
   f: Pick<File, 'name' | 'size'>,
@@ -135,6 +144,23 @@ function putInBoundedCache(
   return next;
 }
 
+function flushPendingCacheWrites(setState: SetState): void {
+  if (cacheWriteTimer) {
+    clearTimeout(cacheWriteTimer);
+    cacheWriteTimer = null;
+  }
+  if (pendingCacheWrites.size === 0) return;
+  const entries = Array.from(pendingCacheWrites.entries());
+  pendingCacheWrites.clear();
+  setState((s) => {
+    let nextCache = s.textCache;
+    for (const [k, v] of entries) {
+      nextCache = putInBoundedCache(nextCache, k, v);
+    }
+    return { textCache: nextCache };
+  });
+}
+
 function rebindFilesToSelection(
   files: OcrFile[],
   cache: Record<string, string>,
@@ -165,19 +191,26 @@ function rebindFilesToSelection(
   });
 }
 
-async function ensureCompressed(
+export async function ensureCompressed(
   state: OcrState,
   fileId: string,
   engine: OcrEngine
-): Promise<File> {
+): Promise<{ file: File; transformKey: string }> {
   const target = state.files.find((f) => f.id === fileId);
   if (!target) throw new Error('File not found');
-  if (target.compressed && engine !== 'groq') return target.compressed;
-  return downscaleImage(target.file, {
+  const autoUpright = engine === 'groq';
+  const expectedKey = buildCloudTransformKey(target.rotationDeg, autoUpright);
+
+  if (target.compressed && target.compressedTransformKey === expectedKey) {
+    return { file: target.compressed, transformKey: expectedKey };
+  }
+
+  const file = await downscaleImage(target.file, {
     target: engine === 'paddle' ? 'local' : 'cloud',
     rotationDeg: engine === 'paddle' ? 0 : target.rotationDeg,
-    autoUprightSideways: engine === 'groq',
+    autoUprightSideways: autoUpright,
   });
+  return { file, transformKey: expectedKey };
 }
 
 type SetState = {
@@ -193,13 +226,13 @@ async function extractOneWithRetries(
   setState: SetState,
   fileId: string,
   signal: AbortSignal,
-  opts: { modeOverride?: OcrMode; skipColorPrecheck?: boolean } = {}
+  opts: { modeOverride?: OcrMode; skipColorPrecheck?: boolean; engineOverride?: OcrEngine } = {}
 ): Promise<ExtractOutcome> {
   const initialState = getState();
   const target = initialState.files.find((f) => f.id === fileId);
   if (!target) return { usedNetwork: false };
 
-  const engine = initialState.selectedEngine;
+  const engine = opts.engineOverride ?? initialState.selectedEngine;
   const mode = opts.modeOverride ?? initialState.extractionMode;
 
   setState((s) => ({
@@ -218,19 +251,29 @@ async function extractOneWithRetries(
 
   let compressed: File | null = null;
   if (engine !== 'paddle') {
-    const needsFreshTransform = engine === 'groq' || Boolean(target.rotationDeg);
-    compressed =
-      !needsFreshTransform && target.compressed
-        ? target.compressed
-        : await downscaleImage(target.file, {
-            target: 'cloud',
-            rotationDeg: target.rotationDeg,
-            autoUprightSideways: engine === 'groq',
-          });
+    const autoUpright = engine === 'groq';
+    const expectedKey = buildCloudTransformKey(target.rotationDeg, autoUpright);
+    const canReusePrewarmed =
+      Boolean(target.compressed) && target.compressedTransformKey === expectedKey;
 
-    if (!target.compressed && !needsFreshTransform) {
+    if (canReusePrewarmed && target.compressed) {
+      compressed = target.compressed;
+    } else {
+      compressed = await downscaleImage(target.file, {
+        target: 'cloud',
+        rotationDeg: target.rotationDeg,
+        autoUprightSideways: autoUpright,
+      });
       setState((s) => ({
-        files: s.files.map((f) => (f.id === fileId ? { ...f, compressed: compressed ?? undefined } : f)),
+        files: s.files.map((f) =>
+          f.id === fileId
+            ? {
+                ...f,
+                compressed: compressed ?? undefined,
+                compressedTransformKey: compressed ? expectedKey : undefined,
+              }
+            : f
+        ),
       }));
     }
   }
@@ -274,13 +317,15 @@ async function extractOneWithRetries(
       let text: string;
       let boxes: OcrBox[] | undefined;
       let autoRot: 0 | 90 | 180 | 270 | undefined;
+      let modelUsed: string | undefined;
 
       if (engine === 'paddle') {
-        const localRes = await recognizeLocal(target.file, mode);
+        const localRes = await recognizeLocal(target.file, mode, signal);
         if (signal.aborted) return { usedNetwork: false };
         text = localRes.text;
         boxes = localRes.boxes;
         autoRot = localRes.rotationDeg;
+        modelUsed = `PP-OCRv6 (${localRes.device})`;
       } else {
         if (!compressed) throw new Error('Error al preparar la imagen');
         const res = await processOcr(compressed, compressed.name, engine, mode, signal);
@@ -299,11 +344,15 @@ async function extractOneWithRetries(
             res.status === 504 ||
             isUpstreamBusyMessage(errMsg)
           ) {
+            if (/no configurada/i.test(errMsg)) {
+              throw new Error(errMsg);
+            }
             throw new Error('UpstreamBusy');
           }
           throw new Error(errMsg);
         }
         if (!body) throw new Error('Respuesta inválida del servidor');
+        modelUsed = body.modelUsed;
         text =
           body.text === NO_HIGHLIGHT_SENTINEL || body.text === 'Sin texto legible en la imagen.'
             ? body.text
@@ -333,6 +382,7 @@ async function extractOneWithRetries(
                 errorMessage: undefined,
                 infoMessage: undefined,
                 quotaSaved: false,
+                modelUsed: modelUsed ?? f.modelUsed,
               }
             : f
         ),
@@ -352,8 +402,9 @@ async function extractOneWithRetries(
       attempt++;
       const isRate = e.message === 'RateLimit';
       const isBusy = e.message === 'UpstreamBusy';
+      const isMissingKey = /no configurada/i.test(e.message);
       const attemptCap = isRate || isBusy ? MAX_BUSY_ATTEMPTS : MAX_ATTEMPTS;
-      const canRetry = engine !== 'paddle' && attempt < attemptCap;
+      const canRetry = engine !== 'paddle' && !isMissingKey && attempt < attemptCap;
 
       if (!canRetry) {
         setState((s) => ({
@@ -409,6 +460,95 @@ async function extractOneWithRetries(
   return { usedNetwork: engine !== 'paddle' };
 }
 
+async function runBatchQueue(
+  getState: () => OcrState,
+  setState: SetState,
+  targetIds: string[]
+): Promise<void> {
+  if (targetIds.length === 0) return;
+  if (getState().isProcessingBatch) return;
+
+  abortController = new AbortController();
+  cancelled = false;
+  const { signal } = abortController;
+  const total = targetIds.length;
+
+  setState({
+    isProcessingBatch: true,
+    globalStatus: 'working',
+    globalProgress: 0,
+    batchTotal: total,
+    batchCompleted: 0,
+  });
+
+  try {
+    for (let i = 0; i < total; i++) {
+      if (signal.aborted || cancelled) break;
+
+      const currentId = targetIds[i];
+      const currentEngine = getState().selectedEngine;
+      const nextId = targetIds[i + 1];
+      const prewarm =
+        nextId && currentEngine !== 'paddle'
+          ? ensureCompressed(getState(), nextId, currentEngine)
+              .then(({ file, transformKey }) =>
+                setState((s) => ({
+                  files: s.files.map((f) =>
+                    f.id === nextId
+                      ? { ...f, compressed: file, compressedTransformKey: transformKey }
+                      : f
+                  ),
+                }))
+              )
+              .catch(() => {})
+          : Promise.resolve();
+
+      const outcome = await extractOneWithRetries(getState, setState, currentId, signal);
+      if (signal.aborted || cancelled) break;
+
+      const completed = i + 1;
+      setState({
+        batchCompleted: completed,
+        globalProgress: Math.round((completed / total) * 100),
+      });
+
+      if (i < total - 1 && !signal.aborted && !cancelled) {
+        const interFileDelay = !outcome.usedNetwork
+          ? 0
+          : getState().selectedEngine === 'paddle'
+            ? 0
+            : getState().selectedEngine === 'groq'
+              ? INTER_FILE_DELAY_GROQ_MS
+              : INTER_FILE_DELAY_GEMINI_MS;
+
+        await Promise.all([
+          prewarm,
+          interFileDelay === 0
+            ? Promise.resolve()
+            : new Promise<void>((resolve) => {
+                const t = setTimeout(resolve, interFileDelay);
+                signal.addEventListener(
+                  'abort',
+                  () => {
+                    clearTimeout(t);
+                    resolve();
+                  },
+                  { once: true }
+                );
+              }),
+        ]);
+      }
+    }
+  } finally {
+    const wasAborted = cancelled || signal.aborted;
+    setState((s) => ({
+      isProcessingBatch: false,
+      globalStatus: wasAborted ? 'idle' : 'done',
+      ...(wasAborted ? { globalProgress: 0, batchTotal: 0, batchCompleted: 0 } : { batchCompleted: s.batchCompleted }),
+    }));
+  }
+}
+
 const memoryFallback = new Map<string, string>();
 const safeLocalStorage: StateStorage = {
   getItem: (name) => {
@@ -452,6 +592,9 @@ export const useOcrStore = create<OcrState>()(
       activeFileId: null,
       globalStatus: 'idle',
       globalProgress: 0,
+      isProcessingBatch: false,
+      batchTotal: 0,
+      batchCompleted: 0,
       selectedEngine: 'gemini',
       extractionMode: 'highlight',
       fontSize: 16,
@@ -459,19 +602,23 @@ export const useOcrStore = create<OcrState>()(
       quotaSavedCount: 0,
       lastClearedSnapshot: null,
 
-      setSelectedEngine: (engine) =>
+      setSelectedEngine: (engine) => {
+        flushPendingCacheWrites(set);
         set((s) => ({
           selectedEngine: engine,
           globalStatus: s.globalStatus === 'working' ? s.globalStatus : 'idle',
           files: rebindFilesToSelection(s.files, s.textCache, engine, s.extractionMode),
-        })),
+        }));
+      },
 
-      setExtractionMode: (mode) =>
+      setExtractionMode: (mode) => {
+        flushPendingCacheWrites(set);
         set((s) => ({
           extractionMode: mode,
           globalStatus: s.globalStatus === 'working' ? s.globalStatus : 'idle',
           files: rebindFilesToSelection(s.files, s.textCache, s.selectedEngine, mode),
-        })),
+        }));
+      },
 
       setFontSize: (size) => set({ fontSize: Math.min(28, Math.max(12, Math.round(size))) }),
 
@@ -480,7 +627,12 @@ export const useOcrStore = create<OcrState>()(
           files: s.files.map((f) => {
             if (f.id !== id) return f;
             const nextDeg = (((f.rotationDeg ?? 0) + 90) % 360) as 0 | 90 | 180 | 270;
-            return { ...f, rotationDeg: nextDeg, compressed: undefined };
+            return {
+              ...f,
+              rotationDeg: nextDeg,
+              compressed: undefined,
+              compressedTransformKey: undefined,
+            };
           }),
         })),
 
@@ -539,7 +691,10 @@ export const useOcrStore = create<OcrState>()(
         };
       },
 
-      setActiveFile: (id) => set({ activeFileId: id }),
+      setActiveFile: (id) => {
+        flushPendingCacheWrites(set);
+        set({ activeFileId: id });
+      },
 
       removeFile: (id) =>
         set((state) => {
@@ -558,6 +713,8 @@ export const useOcrStore = create<OcrState>()(
         cancelled = true;
         abortController?.abort();
         abortController = null;
+        terminateLocalWorker(true);
+        flushPendingCacheWrites(set);
         set((state) => {
           if (state.files.length === 0) return {};
           const snapshot: UndoSnapshot = {
@@ -570,6 +727,9 @@ export const useOcrStore = create<OcrState>()(
             activeFileId: null,
             globalStatus: 'idle',
             globalProgress: 0,
+            isProcessingBatch: false,
+            batchTotal: 0,
+            batchCompleted: 0,
             lastClearedSnapshot: snapshot,
           };
         });
@@ -595,6 +755,9 @@ export const useOcrStore = create<OcrState>()(
           lastClearedSnapshot: null,
           globalStatus: 'idle',
           globalProgress: 0,
+          isProcessingBatch: false,
+          batchTotal: 0,
+          batchCompleted: 0,
         });
         return true;
       },
@@ -605,29 +768,51 @@ export const useOcrStore = create<OcrState>()(
         lastClearedSnapshot?.files.forEach((f) => URL.revokeObjectURL(f.previewUrl));
       },
 
-      updateFileResult: (id, text) =>
-        set((state) => {
-          const target = state.files.find((f) => f.id === id);
-          const newCache = target
-            ? putInBoundedCache(
-                state.textCache,
-                buildCacheKey(target.file, state.selectedEngine, state.extractionMode),
-                text
-              )
-            : state.textCache;
-          return {
-            files: state.files.map((f) => (f.id === id ? { ...f, resultText: text } : f)),
-            textCache: newCache,
-          };
-        }),
+      updateFileResult: (id, text, opts) => {
+        const state = get();
+        const target = state.files.find((f) => f.id === id);
+        if (!target) return;
+
+        const cacheKey = buildCacheKey(target.file, state.selectedEngine, state.extractionMode);
+        const immediate = opts?.immediateCache ?? false;
+
+        if (immediate) {
+          if (cacheWriteTimer) {
+            clearTimeout(cacheWriteTimer);
+            cacheWriteTimer = null;
+          }
+          pendingCacheWrites.delete(cacheKey);
+          set((s) => ({
+            files: s.files.map((f) => (f.id === id ? { ...f, resultText: text } : f)),
+            textCache: putInBoundedCache(s.textCache, cacheKey, text),
+          }));
+          return;
+        }
+
+        // Actualización inmediata del texto en memoria activa sin clonar ni persistir
+        // toda la caché de localStorage en cada tecla; se persiste tras 300ms de pausa.
+        set((s) => ({
+          files: s.files.map((f) => (f.id === id ? { ...f, resultText: text } : f)),
+        }));
+
+        pendingCacheWrites.set(cacheKey, text);
+        if (cacheWriteTimer) clearTimeout(cacheWriteTimer);
+        cacheWriteTimer = setTimeout(() => {
+          flushPendingCacheWrites(set);
+        }, CACHE_WRITE_DEBOUNCE_MS);
+      },
 
       cancel: () => {
         cancelled = true;
         abortController?.abort();
         abortController = null;
+        terminateLocalWorker(true);
         set((s) => ({
           globalStatus: 'idle',
           globalProgress: 0,
+          isProcessingBatch: false,
+          batchTotal: 0,
+          batchCompleted: 0,
           files: s.files.map((f) =>
             f.status === 'processing'
               ? { ...f, status: 'idle', infoMessage: undefined }
@@ -637,27 +822,91 @@ export const useOcrStore = create<OcrState>()(
       },
 
       processOne: async (id) => {
+        if (get().isProcessingBatch) return;
         const ac = new AbortController();
         abortController = ac;
         cancelled = false;
-        set({ globalStatus: 'working' });
-        await extractOneWithRetries(get, set, id, ac.signal, { skipColorPrecheck: true });
-        if (!ac.signal.aborted && !cancelled) set({ globalStatus: 'done' });
+        set({
+          isProcessingBatch: true,
+          globalStatus: 'working',
+          globalProgress: 0,
+          batchTotal: 1,
+          batchCompleted: 0,
+        });
+        try {
+          await extractOneWithRetries(get, set, id, ac.signal, { skipColorPrecheck: true });
+        } finally {
+          const wasAborted = ac.signal.aborted || cancelled;
+          set({
+            isProcessingBatch: false,
+            globalStatus: wasAborted ? 'idle' : 'done',
+            globalProgress: wasAborted ? 0 : 100,
+            batchCompleted: wasAborted ? 0 : 1,
+          });
+        }
       },
 
       processOneFullPage: async (id) => {
+        if (get().isProcessingBatch) return;
         const ac = new AbortController();
         abortController = ac;
         cancelled = false;
-        set({ globalStatus: 'working' });
-        await extractOneWithRetries(get, set, id, ac.signal, {
-          modeOverride: 'full',
-          skipColorPrecheck: true,
+        set({
+          isProcessingBatch: true,
+          globalStatus: 'working',
+          globalProgress: 0,
+          batchTotal: 1,
+          batchCompleted: 0,
         });
-        if (!ac.signal.aborted && !cancelled) set({ globalStatus: 'done' });
+        try {
+          await extractOneWithRetries(get, set, id, ac.signal, {
+            modeOverride: 'full',
+            skipColorPrecheck: true,
+          });
+        } finally {
+          const wasAborted = ac.signal.aborted || cancelled;
+          set({
+            isProcessingBatch: false,
+            globalStatus: wasAborted ? 'idle' : 'done',
+            globalProgress: wasAborted ? 0 : 100,
+            batchCompleted: wasAborted ? 0 : 1,
+          });
+        }
+      },
+
+      processOneForceHighlightAi: async (id) => {
+        if (get().isProcessingBatch) return;
+        const ac = new AbortController();
+        abortController = ac;
+        cancelled = false;
+        const currentEngine = get().selectedEngine;
+        const aiEngine: OcrEngine = currentEngine === 'paddle' ? 'gemini' : currentEngine;
+        set({
+          isProcessingBatch: true,
+          globalStatus: 'working',
+          globalProgress: 0,
+          batchTotal: 1,
+          batchCompleted: 0,
+        });
+        try {
+          await extractOneWithRetries(get, set, id, ac.signal, {
+            modeOverride: 'highlight',
+            engineOverride: aiEngine,
+            skipColorPrecheck: true,
+          });
+        } finally {
+          const wasAborted = ac.signal.aborted || cancelled;
+          set({
+            isProcessingBatch: false,
+            globalStatus: wasAborted ? 'idle' : 'done',
+            globalProgress: wasAborted ? 0 : 100,
+            batchCompleted: wasAborted ? 0 : 1,
+          });
+        }
       },
 
       forceRetry: async (id) => {
+        if (get().isProcessingBatch) return;
         const target = get().files.find((f) => f.id === id);
         if (!target) return;
         set((s) => {
@@ -687,68 +936,18 @@ export const useOcrStore = create<OcrState>()(
 
       processAll: async () => {
         const state = get();
+        if (state.isProcessingBatch) return;
         const toProcess = state.files.filter((f) => f.status === 'idle' || f.status === 'error');
         if (toProcess.length === 0) return;
-
-        abortController = new AbortController();
-        cancelled = false;
-        const { signal } = abortController;
-
-        set({ globalStatus: 'working', globalProgress: 0 });
-
-        for (let i = 0; i < toProcess.length; i++) {
-          if (signal.aborted || cancelled) break;
-
-          const currentEngine = get().selectedEngine;
-          const nextId = toProcess[i + 1]?.id;
-          const prewarm =
-            nextId && currentEngine !== 'paddle'
-              ? ensureCompressed(get(), nextId, currentEngine)
-                  .then((c) =>
-                    set((s) => ({
-                      files: s.files.map((f) => (f.id === nextId ? { ...f, compressed: c } : f)),
-                    }))
-                  )
-                  .catch(() => {})
-              : Promise.resolve();
-
-          const outcome = await extractOneWithRetries(get, set, toProcess[i].id, signal);
-
-          const processedCount = i + 1;
-          set({ globalProgress: Math.round((processedCount / toProcess.length) * 100) });
-
-          if (i < toProcess.length - 1 && !signal.aborted) {
-            const interFileDelay = !outcome.usedNetwork
-              ? 0
-              : get().selectedEngine === 'paddle'
-                ? 0
-                : get().selectedEngine === 'groq'
-                  ? INTER_FILE_DELAY_GROQ_MS
-                  : INTER_FILE_DELAY_GEMINI_MS;
-
-            await Promise.all([
-              prewarm,
-              interFileDelay === 0
-                ? Promise.resolve()
-                : new Promise<void>((resolve) => {
-                    const t = setTimeout(resolve, interFileDelay);
-                    signal.addEventListener(
-                      'abort',
-                      () => {
-                        clearTimeout(t);
-                        resolve();
-                      },
-                      { once: true }
-                    );
-                  }),
-            ]);
-          }
-        }
-
-        if (!cancelled && !signal.aborted) set({ globalStatus: 'done' });
+        await runBatchQueue(
+          get,
+          set,
+          toProcess.map((f) => f.id)
+        );
       },
 
       retryAllErrors: async () => {
+        if (get().isProcessingBatch) return;
         const errored = get().files.filter((f) => f.status === 'error');
         if (errored.length === 0) return;
         await get().processSelected(errored.map((f) => f.id));
@@ -783,6 +982,7 @@ export const useOcrStore = create<OcrState>()(
         }),
 
       processSelected: async (ids) => {
+        if (get().isProcessingBatch) return;
         const idSet = new Set(ids);
         const toProcess = get().files.filter((f) => idSet.has(f.id) && f.status !== 'processing');
         if (toProcess.length === 0) return;
@@ -800,62 +1000,11 @@ export const useOcrStore = create<OcrState>()(
           ),
         }));
 
-        abortController = new AbortController();
-        cancelled = false;
-        const { signal } = abortController;
-
-        set({ globalStatus: 'working', globalProgress: 0 });
-
-        for (let i = 0; i < toProcess.length; i++) {
-          if (signal.aborted || cancelled) break;
-
-          const currentEngine = get().selectedEngine;
-          const nextId = toProcess[i + 1]?.id;
-          const prewarm =
-            nextId && currentEngine !== 'paddle'
-              ? ensureCompressed(get(), nextId, currentEngine)
-                  .then((c) =>
-                    set((s) => ({
-                      files: s.files.map((f) => (f.id === nextId ? { ...f, compressed: c } : f)),
-                    }))
-                  )
-                  .catch(() => {})
-              : Promise.resolve();
-
-          const outcome = await extractOneWithRetries(get, set, toProcess[i].id, signal);
-
-          const processedCount = i + 1;
-          set({ globalProgress: Math.round((processedCount / toProcess.length) * 100) });
-
-          if (i < toProcess.length - 1 && !signal.aborted) {
-            const interFileDelay = !outcome.usedNetwork
-              ? 0
-              : get().selectedEngine === 'paddle'
-                ? 0
-                : get().selectedEngine === 'groq'
-                  ? INTER_FILE_DELAY_GROQ_MS
-                  : INTER_FILE_DELAY_GEMINI_MS;
-
-            await Promise.all([
-              prewarm,
-              interFileDelay === 0
-                ? Promise.resolve()
-                : new Promise<void>((resolve) => {
-                    const t = setTimeout(resolve, interFileDelay);
-                    signal.addEventListener(
-                      'abort',
-                      () => {
-                        clearTimeout(t);
-                        resolve();
-                      },
-                      { once: true }
-                    );
-                  }),
-            ]);
-          }
-        }
-
-        if (!cancelled && !signal.aborted) set({ globalStatus: 'done' });
+        await runBatchQueue(
+          get,
+          set,
+          toProcess.map((f) => f.id)
+        );
       },
     }),
     {
@@ -864,8 +1013,6 @@ export const useOcrStore = create<OcrState>()(
       storage: createJSONStorage(() => safeLocalStorage),
       migrate: (persistedState: unknown, version: number) => {
         const prev = (persistedState ?? {}) as Partial<OcrState>;
-        // En v6 limpiamos textCache anterior (v1-v5) para purgar transcripciones previas
-        // al detector cuadrilátero, auto-rotación 270° y modelo latin_PP-OCRv5.
         return {
           selectedEngine: prev.selectedEngine ?? 'gemini',
           extractionMode: prev.extractionMode ?? 'highlight',
@@ -889,6 +1036,9 @@ export const ocrSelectors = {
   activeFileId: (s: OcrState) => s.activeFileId,
   globalStatus: (s: OcrState) => s.globalStatus,
   globalProgress: (s: OcrState) => s.globalProgress,
+  isProcessingBatch: (s: OcrState) => s.isProcessingBatch,
+  batchTotal: (s: OcrState) => s.batchTotal,
+  batchCompleted: (s: OcrState) => s.batchCompleted,
   selectedEngine: (s: OcrState) => s.selectedEngine,
   extractionMode: (s: OcrState) => s.extractionMode,
   quotaSavedCount: (s: OcrState) => s.quotaSavedCount,

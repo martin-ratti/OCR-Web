@@ -2,7 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ocrSelectors, useOcrStore } from '../../../store/useOcrStore';
 import { exportDocx, exportSingleTxt, exportZipTxt } from '../../../lib/exporters';
-import { reportAddFilesResult } from '../../../lib/addFilesFeedback';
+import {
+  FILE_INPUT_ACCEPT,
+  partitionSupportedImages,
+  reportAddFilesResult,
+} from '../../../lib/addFilesFeedback';
 import { KawaiiModal } from './KawaiiModal';
 import { OriginalViewer } from './OriginalViewer';
 import { ExtractedEditor, type ExtractedEditorHandle } from './ExtractedEditor';
@@ -24,6 +28,8 @@ export function OcrWorkspace() {
   const activeFileId = useOcrStore(ocrSelectors.activeFileId);
   const globalStatus = useOcrStore(ocrSelectors.globalStatus);
   const globalProgress = useOcrStore(ocrSelectors.globalProgress);
+  const batchTotal = useOcrStore(ocrSelectors.batchTotal);
+  const batchCompleted = useOcrStore(ocrSelectors.batchCompleted);
   const selectedEngine = useOcrStore(ocrSelectors.selectedEngine);
   const extractionMode = useOcrStore(ocrSelectors.extractionMode);
   const quotaSavedCount = useOcrStore(ocrSelectors.quotaSavedCount);
@@ -34,6 +40,7 @@ export function OcrWorkspace() {
   const processAll = useOcrStore((s) => s.processAll);
   const processOne = useOcrStore((s) => s.processOne);
   const processOneFullPage = useOcrStore((s) => s.processOneFullPage);
+  const processOneForceHighlightAi = useOcrStore((s) => s.processOneForceHighlightAi);
   const forceRetry = useOcrStore((s) => s.forceRetry);
   const clearAll = useOcrStore((s) => s.clearAll);
   const restoreCleared = useOcrStore((s) => s.restoreCleared);
@@ -82,7 +89,7 @@ export function OcrWorkspace() {
 
   const handleCleanFormat = () => {
     if (!activeFile?.resultText || isEmptyExtractionText(activeFile.resultText)) return;
-    updateFileResult(activeFile.id, cleanOcrText(activeFile.resultText));
+    updateFileResult(activeFile.id, cleanOcrText(activeFile.resultText), { immediateCache: true });
     toast.success('Párrafos y guiones ordenados');
   };
 
@@ -163,17 +170,16 @@ export function OcrWorkspace() {
 
   const handleFilesPicked = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
-    const all = Array.from(e.target.files);
-    const arr = all.filter((f) => f.type.startsWith('image/'));
-    const rejected = all.length - arr.length;
-    if (arr.length === 0) {
+    const { images, rejected, rejectedNames } = partitionSupportedImages(e.target.files);
+    if (images.length === 0) {
       reportAddFilesResult(
         { acceptedCount: 0, duplicates: [], oversized: [], capExceeded: 0 },
-        rejected || all.length,
+        rejected || e.target.files.length,
+        rejectedNames
       );
     } else {
-      const result = addFiles(arr);
-      reportAddFilesResult(result, rejected);
+      const result = addFiles(images);
+      reportAddFilesResult(result, rejected, rejectedNames);
     }
     e.target.value = '';
   };
@@ -279,17 +285,16 @@ export function OcrWorkspace() {
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDraggingOver(false);
-    const all = Array.from(e.dataTransfer.files);
-    const arr = all.filter((f) => f.type.startsWith('image/'));
-    const rejected = all.length - arr.length;
-    if (arr.length === 0) {
+    const { images, rejected, rejectedNames } = partitionSupportedImages(e.dataTransfer.files);
+    if (images.length === 0) {
       reportAddFilesResult(
         { acceptedCount: 0, duplicates: [], oversized: [], capExceeded: 0 },
-        rejected || all.length,
+        rejected || e.dataTransfer.files.length,
+        rejectedNames
       );
     } else {
-      const result = addFiles(arr);
-      reportAddFilesResult(result, rejected);
+      const result = addFiles(images);
+      reportAddFilesResult(result, rejected, rejectedNames);
     }
   };
 
@@ -339,7 +344,7 @@ export function OcrWorkspace() {
         ref={fileInputRef}
         type="file"
         multiple
-        accept="image/*"
+        accept={FILE_INPUT_ACCEPT}
         onChange={handleFilesPicked}
         className="hidden"
         aria-hidden
@@ -381,8 +386,10 @@ export function OcrWorkspace() {
             <div className="flex items-center justify-between text-xs font-extrabold text-pink-600 dark:text-pink-300 mb-1.5">
               <span className="inline-flex items-center gap-1.5">
                 <ScanLine className="w-3.5 h-3.5 motion-safe:animate-pulse" aria-hidden />
-                Procesando {counts.processing || '—'} /{' '}
-                {counts.pending + counts.error + counts.processing}
+                Procesando{' '}
+                {batchTotal > 0
+                  ? `${Math.min(batchTotal, batchCompleted + 1)} / ${batchTotal}`
+                  : `${counts.processing || 1} / ${Math.max(1, counts.pending + counts.error + counts.processing)}`}
               </span>
               <span>{globalProgress}%</span>
             </div>
@@ -442,6 +449,7 @@ export function OcrWorkspace() {
               onChange={handleEditorChange}
               onCopy={handleCopy}
               onReadFullPage={processOneFullPage}
+              onForceHighlightAi={processOneForceHighlightAi}
               onSwitchToLocalAndRetry={handleSwitchToLocalAndRetry}
             />
           </div>

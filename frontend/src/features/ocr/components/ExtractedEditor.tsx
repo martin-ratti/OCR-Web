@@ -6,6 +6,7 @@ import {
   Copy,
   Cpu,
   FileText,
+  Highlighter,
   Leaf,
   Play,
   Search,
@@ -25,6 +26,7 @@ interface ExtractedEditorProps {
   onChange: (text: string) => void;
   onCopy: () => Promise<boolean> | boolean;
   onReadFullPage: (id: string) => void;
+  onForceHighlightAi: (id: string) => void;
   onSwitchToLocalAndRetry: (id: string) => void;
 }
 
@@ -42,6 +44,7 @@ export const ExtractedEditor = forwardRef<ExtractedEditorHandle, ExtractedEditor
       onChange,
       onCopy,
       onReadFullPage,
+      onForceHighlightAi,
       onSwitchToLocalAndRetry,
     },
     ref
@@ -235,14 +238,24 @@ export const ExtractedEditor = forwardRef<ExtractedEditorHandle, ExtractedEditor
               <p className="text-xs font-bold text-amber-800 dark:text-amber-200">
                 Esta hoja no tiene marcador resaltador detectado (no se incluirá al exportar Word/ZIP).
               </p>
-              <button
-                type="button"
-                onClick={() => onReadFullPage(activeFile.id)}
-                className="btn-bounce inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-500 hover:bg-amber-600 text-white text-xs font-extrabold shadow-sm"
-              >
-                <Sparkles className="w-3.5 h-3.5" aria-hidden />
-                Leer página entera igual
-              </button>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => onForceHighlightAi(activeFile.id)}
+                  className="btn-bounce inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-pink-500 hover:bg-pink-600 text-white text-xs font-extrabold shadow-sm"
+                >
+                  <Highlighter className="w-3.5 h-3.5" aria-hidden />
+                  Intentar leer resaltado igual con IA
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onReadFullPage(activeFile.id)}
+                  className="btn-bounce inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-500 hover:bg-amber-600 text-white text-xs font-extrabold shadow-sm"
+                >
+                  <Sparkles className="w-3.5 h-3.5" aria-hidden />
+                  Leer página entera igual
+                </button>
+              </div>
             </div>
           )}
 

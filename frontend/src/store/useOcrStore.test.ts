@@ -1,6 +1,9 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { buildCacheKey, useOcrStore } from './useOcrStore';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { buildCacheKey, ensureCompressed, useOcrStore } from './useOcrStore';
 import { isRateLimitMessage, isUpstreamBusyMessage } from '../shared/api';
+import { buildUniqueZipFilenames } from '../lib/exporters';
+import { isSupportedImageFile, partitionSupportedImages } from '../lib/addFilesFeedback';
+import { buildCloudTransformKey } from '../lib/imageDownscale';
 
 describe('useOcrStore', () => {
   beforeEach(() => {
@@ -9,6 +12,9 @@ describe('useOcrStore', () => {
       activeFileId: null,
       globalStatus: 'idle',
       globalProgress: 0,
+      isProcessingBatch: false,
+      batchTotal: 0,
+      batchCompleted: 0,
       selectedEngine: 'gemini',
       extractionMode: 'highlight',
       fontSize: 16,
@@ -24,6 +30,9 @@ describe('useOcrStore', () => {
     expect(state.selectedEngine).toBe('gemini');
     expect(state.extractionMode).toBe('highlight');
     expect(state.globalStatus).toBe('idle');
+    expect(state.isProcessingBatch).toBe(false);
+    expect(state.batchTotal).toBe(0);
+    expect(state.batchCompleted).toBe(0);
   });
 
   it('updates selected engine and extraction mode', () => {
@@ -105,18 +114,98 @@ describe('useOcrStore', () => {
     expect(useOcrStore.getState().files[0].resultText).toBeUndefined();
   });
 
-  it('updates file result, rotates preview, and updates engine+mode-aware cache', () => {
+  it('updates file result immediately and debounces cache persistence (or flushes on immediateCache)', () => {
+    vi.useFakeTimers();
+    try {
+      const fakeFile = new File(['data'], 'doc.png', { type: 'image/png' });
+      useOcrStore.getState().addFiles([fakeFile]);
+      const fileId = useOcrStore.getState().files[0].id;
+
+      useOcrStore.getState().updateFileResult(fileId, 'Nuevo texto editado');
+      useOcrStore.getState().rotateFilePreview(fileId);
+
+      // El texto activo se actualiza al instante sin esperar el debounce
+      expect(useOcrStore.getState().files[0].resultText).toBe('Nuevo texto editado');
+      expect(useOcrStore.getState().files[0].rotationDeg).toBe(90);
+      expect(useOcrStore.getState().textCache['gemini::highlight::doc.png::4']).toBeUndefined();
+
+      vi.advanceTimersByTime(310);
+      expect(useOcrStore.getState().textCache['gemini::highlight::doc.png::4']).toBe(
+        'Nuevo texto editado'
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reuses prewarmed compressed image for Groq when compressedTransformKey matches', async () => {
+    const raw = new File(['raw-data'], 'page.jpg', { type: 'image/jpeg' });
+    const prewarmed = new File(['prewarmed-data'], 'page.webp', { type: 'image/webp' });
+    const transformKey = buildCloudTransformKey(undefined, true);
+
+    useOcrStore.getState().addFiles([raw]);
+    const id = useOcrStore.getState().files[0].id;
+
+    useOcrStore.setState((s) => ({
+      selectedEngine: 'groq',
+      files: s.files.map((f) =>
+        f.id === id ? { ...f, compressed: prewarmed, compressedTransformKey: transformKey } : f
+      ),
+    }));
+
+    const res = await ensureCompressed(useOcrStore.getState(), id, 'groq');
+    expect(res.file).toBe(prewarmed);
+    expect(res.transformKey).toBe(transformKey);
+  });
+
+  it('guards processAll and processSelected from re-entering when isProcessingBatch is true', async () => {
     const fakeFile = new File(['data'], 'doc.png', { type: 'image/png' });
     useOcrStore.getState().addFiles([fakeFile]);
-    const fileId = useOcrStore.getState().files[0].id;
+    const id = useOcrStore.getState().files[0].id;
 
-    useOcrStore.getState().updateFileResult(fileId, 'Nuevo texto editado');
-    useOcrStore.getState().rotateFilePreview(fileId);
+    useOcrStore.setState({ isProcessingBatch: true, globalStatus: 'working' });
+    await useOcrStore.getState().processAll();
+    await useOcrStore.getState().processSelected([id]);
 
-    const state = useOcrStore.getState();
-    expect(state.files[0].resultText).toBe('Nuevo texto editado');
-    expect(state.files[0].rotationDeg).toBe(90);
-    expect(state.textCache['gemini::highlight::doc.png::4']).toBe('Nuevo texto editado');
+    // No debe haber alterado el estado de la hoja porque ya había un lote en curso
+    expect(useOcrStore.getState().files[0].status).toBe('idle');
+  });
+});
+
+describe('file validator & ZIP collision helpers', () => {
+  it('accepts .heic/.heif files on Windows when file.type is empty, and rejects .svg/.bmp/.gif', () => {
+    const heicEmptyMime = new File(['heic'], 'IMG_4021.HEIC', { type: '' });
+    const heifOctet = new File(['heif'], 'photo.heif', { type: 'application/octet-stream' });
+    const svgFile = new File(['<svg/>'], 'diagram.svg', { type: 'image/svg+xml' });
+    const bmpFile = new File(['bmp'], 'scan.bmp', { type: 'image/bmp' });
+    const gifFile = new File(['gif'], 'anim.gif', { type: 'image/gif' });
+
+    expect(isSupportedImageFile(heicEmptyMime)).toBe(true);
+    expect(isSupportedImageFile(heifOctet)).toBe(true);
+    expect(isSupportedImageFile(svgFile)).toBe(false);
+    expect(isSupportedImageFile(bmpFile)).toBe(false);
+    expect(isSupportedImageFile(gifFile)).toBe(false);
+
+    const partitioned = partitionSupportedImages([heicEmptyMime, svgFile, bmpFile]);
+    expect(partitioned.images).toHaveLength(1);
+    expect(partitioned.rejected).toBe(2);
+    expect(partitioned.rejectedNames).toEqual(['diagram.svg', 'scan.bmp']);
+  });
+
+  it('prevents filename collisions in ZIP export by appending _2, _3 suffixes', () => {
+    const entries = buildUniqueZipFilenames([
+      { filename: 'apunte.jpg', text: 'Hoja 1' },
+      { filename: 'apunte.png', text: 'Hoja 2' },
+      { filename: 'APUNTE.webp', text: 'Hoja 3' },
+      { filename: 'resumen.jpg', text: 'Hoja 4' },
+    ]);
+
+    expect(entries.map((e) => e.entryName)).toEqual([
+      'Apunte_apunte.txt',
+      'Apunte_apunte_2.txt',
+      'Apunte_APUNTE_3.txt',
+      'Apunte_resumen.txt',
+    ]);
   });
 });
 
