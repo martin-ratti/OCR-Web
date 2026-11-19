@@ -35,6 +35,7 @@ export type WorkerInMessage =
       buffer: ArrayBuffer;
       mode: OcrMode;
     }
+  | { type: 'abort'; id: number }
   | { type: 'dispose' };
 
 export type WorkerOutMessage =
@@ -525,9 +526,15 @@ function formatSelectedEntries(entries: Array<{ box: PixelBox; text: string }>):
 }
 
 let queue: Promise<void> = Promise.resolve();
+const abortedJobIds = new Set<number>();
 
 self.onmessage = (event: MessageEvent<WorkerInMessage>) => {
   const msg = event.data;
+
+  if (msg.type === 'abort') {
+    abortedJobIds.add(msg.id);
+    return;
+  }
 
   if (msg.type === 'dispose') {
     queue = queue.then(async () => {
@@ -545,8 +552,16 @@ self.onmessage = (event: MessageEvent<WorkerInMessage>) => {
 
   if (msg.type === 'recognize') {
     queue = queue.then(async () => {
+      if (abortedJobIds.has(msg.id)) {
+        abortedJobIds.delete(msg.id);
+        return;
+      }
       try {
         const service = await ensureService();
+        if (abortedJobIds.has(msg.id)) {
+          abortedJobIds.delete(msg.id);
+          return;
+        }
         post({ type: 'progress', status: 'recognizing', progress: 0.1, device: resolvedDevice });
 
         const baseImg: RgbaImage = {
@@ -576,6 +591,11 @@ self.onmessage = (event: MessageEvent<WorkerInMessage>) => {
           }
         );
 
+        if (abortedJobIds.has(msg.id)) {
+          abortedJobIds.delete(msg.id);
+          return;
+        }
+
         let best = evaluateCandidate(service, 0, baseImg, raw0);
 
         if (best.verticalRatio >= 0.3 || best.combinedScore < 0.72) {
@@ -583,12 +603,20 @@ self.onmessage = (event: MessageEvent<WorkerInMessage>) => {
             best.verticalRatio >= 0.3 ? [270, 90] : [270, 90, 180];
 
           for (const deg of candidateDegrees) {
+            if (abortedJobIds.has(msg.id)) {
+              abortedJobIds.delete(msg.id);
+              return;
+            }
             const rotImg = applyRotation(baseImg, deg);
             const rotRaw = await service.recognize({
               width: rotImg.width,
               height: rotImg.height,
               data: rotImg.data as Uint8Array,
             });
+            if (abortedJobIds.has(msg.id)) {
+              abortedJobIds.delete(msg.id);
+              return;
+            }
             const cand = evaluateCandidate(service, deg, rotImg, rotRaw);
             if (cand.combinedScore > best.combinedScore + 0.05) {
               best = cand;

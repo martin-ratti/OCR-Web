@@ -31,6 +31,12 @@ let idleTimer: ReturnType<typeof setTimeout> | null = null;
 const pendingJobs = new Map<number, PendingJob>();
 const progressListeners = new Set<ProgressListener>();
 
+function createAbortError(): Error {
+  const err = new Error('Operación local cancelada por el usuario');
+  err.name = 'AbortError';
+  return err;
+}
+
 function emitProgress(p: LocalOcrProgress): void {
   progressListeners.forEach((fn) => {
     try {
@@ -57,19 +63,33 @@ function scheduleIdleTermination(): void {
   }, IDLE_TERMINATE_MS);
 }
 
-export function terminateLocalWorker(): void {
-  if (!worker) return;
-  try {
-    const disposeMsg: WorkerInMessage = { type: 'dispose' };
-    worker.postMessage(disposeMsg);
-  } catch {
-    /* ignore */
+export function terminateLocalWorker(immediate = false): void {
+  if (pendingJobs.size > 0) {
+    const abortErr = createAbortError();
+    pendingJobs.forEach((job) => job.reject(abortErr));
+    pendingJobs.clear();
   }
+  emitProgress({ status: 'idle', progress: 1 });
+  if (!worker) return;
   const w = worker;
   worker = null;
   if (idleTimer) {
     clearTimeout(idleTimer);
     idleTimer = null;
+  }
+  if (immediate) {
+    try {
+      w.terminate();
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+  try {
+    const disposeMsg: WorkerInMessage = { type: 'dispose' };
+    w.postMessage(disposeMsg);
+  } catch {
+    /* ignore */
   }
   setTimeout(() => {
     try {
@@ -126,7 +146,7 @@ function getWorker(): Worker {
     const error = new Error(err.message || 'Fallo crítico en el Worker de OCR local');
     pendingJobs.forEach((job) => job.reject(error));
     pendingJobs.clear();
-    terminateLocalWorker();
+    terminateLocalWorker(true);
   };
 
   worker = w;
@@ -167,19 +187,56 @@ async function decodeFileToRgbaBuffer(
 
 /**
  * Ejecuta PP-OCRv6 (WebGPU con fallback automático a WASM) dentro de un Web Worker
- * dedicado sin bloquear el hilo principal.
+ * dedicado sin bloquear el hilo principal. Soporta cancelación inmediata mediante AbortSignal.
  */
 export async function recognizeLocal(
   file: Blob,
-  mode: OcrMode = 'highlight'
+  mode: OcrMode = 'highlight',
+  signal?: AbortSignal
 ): Promise<LocalOcrOutput> {
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
+
   const { width, height, buffer } = await decodeFileToRgbaBuffer(file);
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
+
   const w = getWorker();
   const id = nextJobId++;
   lastUsedAt = Date.now();
 
   const result = await new Promise<LocalOcrOutput>((resolve, reject) => {
-    pendingJobs.set(id, { resolve, reject });
+    const onAbort = () => {
+      pendingJobs.delete(id);
+      try {
+        w.postMessage({ type: 'abort', id } satisfies WorkerInMessage);
+      } catch {
+        /* ignore */
+      }
+      terminateLocalWorker(true);
+      reject(createAbortError());
+    };
+
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+
+    pendingJobs.set(id, {
+      resolve: (val) => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve(val);
+      },
+      reject: (err) => {
+        signal?.removeEventListener('abort', onAbort);
+        reject(err);
+      },
+    });
+
     const payload: WorkerInMessage = {
       type: 'recognize',
       id,

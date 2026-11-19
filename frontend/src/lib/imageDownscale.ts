@@ -84,11 +84,20 @@ export function detectSidewaysTextPage(img: {
  * - Limita siempre las dimensiones máximas (`1536px` para IA cloud), ahorrando tokens de visión.
  * - Prefiere `image/webp` con fallback a JPEG.
  */
+export function buildCloudTransformKey(
+  rotationDeg: 0 | 90 | 180 | 270 | undefined,
+  autoUprightSideways: boolean
+): string {
+  return `${CLOUD_MAX_DIMENSION}:${rotationDeg ?? 0}:${autoUprightSideways ? 'auto' : 'fixed'}`;
+}
+
 export async function downscaleImage(
   file: File,
   options: DownscaleOptions = {}
 ): Promise<File> {
-  if (!/^image\/(jpeg|png|webp|heic|heif|gif)$/i.test(file.type)) return file;
+  const hasSupportedMime = /^image\/(jpe?g|png|webp|heic|heif)$/i.test(file.type);
+  const hasSupportedExt = /\.(jpe?g|png|webp|heic|heif)$/i.test(file.name);
+  if (!hasSupportedMime && !hasSupportedExt) return file;
   if (typeof createImageBitmap === 'undefined' || typeof document === 'undefined') {
     return file;
   }
