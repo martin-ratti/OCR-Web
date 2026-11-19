@@ -19,6 +19,8 @@ const EnvSchema = z.object({
   GROQ_MODEL_ID: z.string().min(1).default('qwen/qwen3.8-27b'),
   PORT: z.coerce.number().int().positive().default(3001),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  METRICS_TOKEN: z.string().min(1).optional(),
+  GEMINI_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(20).default(3),
   ALLOWED_ORIGINS: z
     .string()
     .default('http://localhost:5173,http://localhost:4173')
