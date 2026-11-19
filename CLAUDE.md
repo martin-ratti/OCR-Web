@@ -16,7 +16,7 @@ From repo root:
 Backend (`pnpm --filter backend <cmd>` or run inside `backend/`):
 - `pnpm dev` — `ts-node-dev src/index.ts`, listens on `PORT` or `3001`
 - `pnpm build` — runs `pnpm --filter @ocr-web/shared build`, then `tsc` → `dist/`; production start is `node dist/index.js`.
-- `pnpm test` / `pnpm test:watch` — Vitest + Supertest (`backend/tests/ocr.test.ts`). Exercises `/api/ocr/extract` with stub adapters (`gemini`, `groq`, `paddle`), dual mode (`highlight` | `full`), model cascade on 429/503, output sanitization (`<think>`), error sanitization, and magic byte validation.
+- `pnpm test` / `pnpm test:watch` — Vitest + Supertest (`backend/tests/ocr.test.ts`). Exercises `/api/ocr/extract` with stub adapters (`gemini`, `groq`, `paddle`), dual mode (`highlight` | `full`), lightweight model cascade on 429/502/503/504/timeouts, concurrency semaphore, output sanitization (`<think>`), error sanitization, 415 upload validation, and HEIC `ftyp` magic byte verification.
 - `pnpm lint` — ESLint.
 
 Frontend (`pnpm --filter frontend <cmd>` or run inside `frontend/`):
@@ -27,11 +27,13 @@ Frontend (`pnpm --filter frontend <cmd>` or run inside `frontend/`):
 - `pnpm preview` — preview prod build
 
 Environment variables (`backend/.env`):
-- `GEMINI_API_KEY` — optional at boot (Zod `.optional()` in `env.ts`). Required for the **gemini** engine; the adapter throws on first request if missing.
+- `GEMINI_API_KEY` — optional at boot (Zod `.optional()` in `env.ts`). Required for the **gemini** engine; throws `HttpError(503)` on request if missing.
 - `GEMINI_MODEL_ID` — defaults to `gemini-3.5-flash-lite` (never configure `pro` tiers).
-- `GEMINI_FALLBACK_MODELS` — comma-separated Flash/Lite fallback cascade on 429/503; defaults to `gemini-3.5-flash,gemini-2.5-flash-lite,gemini-2.5-flash` (any `pro` entry is automatically filtered out).
-- `GROQ_API_KEY` — optional at boot. Required for the **groq** engine. Free tier: 1000 RPD / 30 RPM — recommended hosted engine for heavy fast batches.
-- `GROQ_MODEL_ID` — defaults to `qwen/qwen3.8-27b` (Alibaba Qwen multimodal vision with fast LPU inference).
+- `GEMINI_FALLBACK_MODELS` — comma-separated Flash/Lite fallback cascade on 429/502/503/504/timeouts; defaults to `gemini-3.5-flash,gemini-2.5-flash-lite,gemini-2.5-flash` (any `pro` entry is automatically filtered out).
+- `GEMINI_MAX_CONCURRENCY` — max concurrent requests to Gemini API across the server (default `3`).
+- `GROQ_API_KEY` — optional at boot. Required for the **groq** engine; throws `HttpError(503)` if missing. Free tier: 1000 RPD / 30 RPM — recommended hosted engine for heavy fast batches.
+- `GROQ_MODEL_ID` — defaults to `qwen/qwen3.8-27b` (also compatible with Groq Llama 4 Scout multimodal vision models on LPU).
+- `METRICS_TOKEN` — optional Bearer token required to read `GET /metrics`. In `NODE_ENV=production`, `/metrics` returns `403` if `METRICS_TOKEN` is unset.
 - `ALLOWED_ORIGINS` — comma-separated CORS whitelist; defaults to `http://localhost:5173,http://localhost:4173`. Use `*` only in dev.
 - `NODE_ENV` — `development` | `production` | `test` (default `development`).
 - `PORT` — default `3001`.
@@ -42,7 +44,7 @@ Frontend reads `VITE_API_URL` (base URL only — do **not** include `/api`; trai
 
 `rules.json` at the repo root is tracked (project-level rule config — don't delete as housekeeping). `scratch/` is gitignored workspace for local experiments; treat files there as throwaway and don't rely on them.
 
-Root `package.json` no longer pins any `onlyBuiltDependencies` — the previous entries (`sharp`, `onnxruntime-node`, `protobufjs`) were only required by the now-removed server-side Paddle engine. `backend/package.json` pins `packageManager: pnpm@10.33.0`; don't bump it ad hoc — it locks the workspace lockfile format.
+Root `package.json` no longer pins any `onlyBuiltDependencies` — the previous entries (`sharp`, `onnxruntime-node`, `protobufjs`) were only required by the now-removed server-side Paddle engine. `backend/package.json` pins `packageManager: pnpm@10.33.0`; don't bump it ad hoc — it locks the workspace lockfile format. Keep only the root `pnpm-lock.yaml` (never commit orphan lockfiles in `backend/` or `frontend/`).
 
 ## Architecture ("EstacionAR")
 
@@ -50,47 +52,49 @@ Clean Architecture, modular by feature. The single feature today is `ocr`.
 
 ### Backend flow (`backend/src/`)
 
-`index.ts` is just the boot (`createApp().listen(env.PORT)`). The Express wiring lives in `app.ts` as a `createApp(opts)` factory — `opts.ocrController` lets tests inject a stub controller, `opts.enableGlobalLimiter: false` disables the IP limiter for test runs. Keep this seam; don't re-inline the wiring into `index.ts`.
+`index.ts` boots the HTTP server (`createApp().listen(env.PORT)`) and registers `SIGTERM`/`SIGINT` handlers for graceful shutdown (`server.close()`). The Express wiring lives in `app.ts` as a `createApp(opts)` factory — `opts.ocrController` lets tests inject a stub controller, `opts.enableGlobalLimiter: false` disables the IP limiter for test runs. Keep this seam; don't re-inline the wiring into `index.ts`.
 
-Middleware order in `createApp`: `helmet()` → `requestId` → `metricsMiddleware` → CORS (origin-callback against `env.ALLOWED_ORIGINS`, strips trailing slashes before matching) → `express.json({ limit: '100kb' })` → `globalLimiter` (conditional) → `/health` + `/metrics` routes → `/api/ocr` → `errorHandler` (last). `trust proxy` is set to 1 for Render/Vercel.
+Middleware order in `createApp`: `helmet()` → `requestId` → `metricsMiddleware` → CORS (origin-callback against `env.ALLOWED_ORIGINS`, strips trailing slashes before matching) → `express.json({ limit: '100kb' })` → `globalLimiter` (conditional) → `/health` + `/api/health` + `/metrics` routes → `/api/ocr` → `errorHandler` (last). `trust proxy` is set to 1 for Render/Vercel.
 
 Per-feature layering under `features/<feature>/`:
 
-`router` (per-route middlewares: `ocrLimiter` + `uploadImage.single`) → `controller` (HTTP shape; parses `engine` and `mode` fields with `ExtractRequestSchema`, throws `HttpError`/delegates to `next(err)`) → `service` (picks adapter per `OcrEngine`, lazily constructs the chosen one; accepts override map for DI) → `adapter` (`GeminiOcrAdapter` + `GroqOcrAdapter`; the `paddle` engine runs in the browser) → `schema` (Zod contracts re-exported from `@ocr-web/shared`).
+`router` (per-route middlewares: `ocrLimiter` + `uploadImage.single`) → `controller` (HTTP shape; parses `engine` and `mode` fields with `ExtractRequestSchema`, populates `modelUsed` on `ExtractResponse`, throws `HttpError`/delegates to `next(err)`) → `service` (picks adapter per `OcrEngine`, lazily constructs the chosen one; accepts override map for DI) → `adapters/` (`GeminiOcrAdapter` in `adapters/gemini.adapter.ts`, `GroqOcrAdapter` in `adapters/groq.adapter.ts`, shared contracts/semaphore/sanitizer in `adapters/ocr.adapter.ts`; the `paddle` engine runs in the browser) → `schema` (Zod contracts re-exported from `@ocr-web/shared`).
 
 Adapters & Dual Mode (`mode: 'highlight' | 'full'`):
-- `GeminiOcrAdapter` — calls `@google/genai` starting with `gemini-3.5-flash-lite` and automatically cascading across `GEMINI_FALLBACK_MODELS` on 429/503/404. Uses `systemInstruction` (enabling implicit prompt caching), `temperature: 0`, `topP: 0.1`, `thinkingBudget: 256` (`highlight`) or `0` (`full`), `maxOutputTokens: 2048`, **90 s timeout**.
-- `GroqOcrAdapter` — calls Groq's OpenAI-compatible chat completions endpoint (`api.groq.com/openai/v1/chat/completions`) with `qwen/qwen3.8-27b`, system+user message split, `max_tokens: 2048`, 45 s timeout via `AbortController`, and `sanitizeModelOutput` (strips `<think>...</think>` reasoning blocks and fences).
-- `recognizeLocal` (browser) — runs PP-OCRv6 inside `paddleOcr.worker.ts` (WebGPU → WASM fallback, `maxSideLength: 1536`, automatic 4-rotation recovery when lexical coherence is low, adaptive paper-white chromatic highlight filter via `highlightDetector.ts`, and Spanish anti-gibberish filtering). Auto-terminates after 5 min idle.
-- `hasValidImageMagicBytes` (`backend/src/middlewares/upload.ts`) — validates binary magic signatures (JPEG, PNG, WebP, GIF, HEIC) to block corrupt or spoofed payloads before passing buffers to OCR services.
+- `GeminiOcrAdapter` (`backend/src/features/ocr/adapters/gemini.adapter.ts`) — calls `@google/genai` starting with `gemini-3.5-flash-lite` and automatically cascading across `GEMINI_FALLBACK_MODELS` on 429/502/503/504/404/ETIMEDOUT/AbortError/timeout. Guarded by `ConcurrencySemaphore` (`GEMINI_MAX_CONCURRENCY`, default 3). Uses `systemInstruction` (enabling implicit prompt caching), `temperature: 0`, `topP: 0.1`, `thinkingBudget: 256` (`highlight`) or `0` (`full`), `maxOutputTokens: 2048`, **60 s timeout**.
+- `GroqOcrAdapter` (`backend/src/features/ocr/adapters/groq.adapter.ts`) — calls Groq's OpenAI-compatible chat completions endpoint (`api.groq.com/openai/v1/chat/completions`) with `qwen/qwen3.8-27b` (or Groq Llama 4 Scout), system+user message split, `max_tokens: 2048`, 45 s timeout via `AbortController`, and `sanitizeModelOutput` (strips `<think>...</think>` reasoning blocks and fences).
+- `recognizeLocal` (browser) — runs PP-OCRv6 inside `paddleOcr.worker.ts` (WebGPU → WASM fallback, `maxSideLength: 1600`, automatic 4-rotation recovery when lexical coherence is low, adaptive paper-white chromatic highlight filter via `highlightDetector.ts`, Spanish anti-gibberish filtering, and immediate cancellation + worker termination on `AbortSignal`). Auto-terminates after 5 min idle.
+- `hasValidImageMagicBytes` (`backend/src/middlewares/upload.ts`) — validates binary magic signatures (JPEG, PNG, WebP, GIF, and ISO-BMFF `ftyp` with valid HEIC/HEIF major/compatible brands `heic|heix|hevc|hevx|mif1|msf1`) to block corrupt payloads or renamed MP4/MOV videos with HTTP 415 before passing buffers to OCR services.
 
-**Shared sentinel contract (`NO_HIGHLIGHT_SENTINEL`).** Defined in `@ocr-web/shared` (`"No se detectó texto resaltado en esta imagen."`). Emitted across all three engines when `mode === 'highlight'` and a page has no highlighter marks (including client-side precheck `checkBlobHasHighlight` before hitting cloud APIs). Exporters (`collectDoneItems`) exclude sentinel pages automatically so Word/ZIP outputs stay clean.
+**Shared sentinel contract (`NO_HIGHLIGHT_SENTINEL`).** Defined in `@ocr-web/shared` (`"No se detectó texto resaltado en esta imagen."`). Emitted across all three engines when `mode === 'highlight'` and a page has no highlighter marks (including client-side precheck `checkBlobHasHighlight` before hitting cloud APIs). Users can click **"Intentar leer resaltado igual con IA"** (`processOneForceHighlightAi`) to bypass the local HSV precheck on faint pastel markers. Exporters (`collectDoneItems`) exclude sentinel pages automatically so Word/ZIP outputs stay clean.
 
 Shared config in `backend/src/config/`:
-- `env.ts` — Zod-validated env. `GEMINI_API_KEY` and `GROQ_API_KEY` are `.optional()` at boot.
+- `env.ts` — Zod-validated env. `GEMINI_API_KEY`, `GROQ_API_KEY`, and `METRICS_TOKEN` are `.optional()` at boot.
 - `prompt.ts` — token-optimized `HIGHLIGHT_EXTRACTION_PROMPT` and `FULL_PAGE_EXTRACTION_PROMPT` (~320 tokens each) + `NO_HIGHLIGHT_SENTINEL`. Tune prompts here, never upgrade to `pro` models.
 - `logger.ts` — timestamped console wrapper; `info` gated by `NODE_ENV`. `withRequestId(id)` returns a scoped logger for per-request correlation.
 
 Middlewares in `backend/src/middlewares/`:
-- `upload.ts` — `uploadImage` multer instance: memory storage, 5 MB, 1 file max, `fileFilter` whitelists `jpeg|png|webp|gif|heic|heif`. Exports `hasValidImageMagicBytes` for binary magic byte verification.
+- `upload.ts` — `uploadImage` multer instance: memory storage, 5 MB, 1 file max, `fileFilter` whitelists `jpeg|png|webp|gif|heic|heif` (with filename extension fallback when `mimetype` is empty/`application/octet-stream`) and throws `HttpError(415)` on unsupported types. Exports `hasValidImageMagicBytes`.
 - `rateLimit.ts` — two limiters. `ocrLimiter` (25 req/min per IP) on `/api/ocr/*`; `globalLimiter` (300 req / 15 min per IP) app-wide.
 - `errorHandler.ts` — terminal middleware. Maps `MulterError` (413 on `LIMIT_FILE_SIZE`, else 400), `HttpError`, rate-limit detection (429), and unknown → 500. Always returns `ExtractResponse`-shaped JSON.
 - `requestId.ts` — assigns/propagates `X-Request-Id` header; attaches `req.requestId` for logger scoping.
-- `metrics.ts` — in-process counters exposed at `GET /metrics` in Prometheus text format (`renderMetrics()`).
+- `metrics.ts` — in-process counters exposed at `GET /metrics` in Prometheus text format (`renderMetrics()`), normalizing unmatched 404 routes to `"UNMATCHED_ROUTE"` and escaping special label characters.
 
-Health: `GET /health` returns `{ status: 'ok', timestamp }`. Use it for Render uptime pings.
+Health: `GET /health` and `GET /api/health` return `{ status: 'ok', timestamp, engines: { gemini, groq, local: true } }`. Use it for Render uptime pings and engine availability checks.
 
 ### Frontend flow (`frontend/src/`)
 
 Feature-Sliced-Design-lite. Layers:
 - `features/ocr/components/` — presentation (Shadcn/Radix + Tailwind, full light/dark support). `OcrDropzone` and `OcrWorkspace` are the two top-level states.
-- `store/useOcrStore.ts` — Zustand store; owns queue, `extractionMode` (`'highlight' | 'full'`), `quotaSavedCount`, per-file status/boxes/rotation, global progress, abort controller, and upload loops. `MAX_FILES = 200` ceiling. Zero-Quota Waste precheck skips network calls on unhighlighted pages when `mode === 'highlight'`.
-- **Persistence.** Wrapped with `zustand/middleware` `persist` (`name: 'ocr-web-state'`, `version: 5`, resilient `safeLocalStorage` wrapper). `partialize` persists `selectedEngine`, `extractionMode`, `fontSize`, and bounded `textCache` (LRU max 250 entries) keyed by `${selectedEngine}::${extractionMode}::${file.name}::${file.size}`.
-- **Prewarm pipeline.** While file *i* is in Gemini/Groq, file *i+1* is pre-compressed in parallel (`ensureCompressed`). Keep this; losing it ~doubles wall-clock on batches.
+- `store/useOcrStore.ts` — Zustand store; owns queue, `extractionMode` (`'highlight' | 'full'`), `isProcessingBatch` re-entry guard, `batchTotal` / `batchCompleted` forward progress counters, `quotaSavedCount`, per-file status/boxes/rotation, global progress, abort controller, and unified batch runner (`runBatchQueue`). `MAX_FILES = 200` ceiling. Zero-Quota Waste precheck skips network calls on unhighlighted pages when `mode === 'highlight'`.
+- **Persistence.** Wrapped with `zustand/middleware` `persist` (`name: 'ocr-web-state'`, `version: 6`, resilient `safeLocalStorage` wrapper). `partialize` persists `selectedEngine`, `extractionMode`, `fontSize`, and bounded `textCache` (LRU max 250 entries, debounced 300ms on keystrokes) keyed by `${selectedEngine}::${extractionMode}::${file.name}::${file.size}`.
+- **Prewarm pipeline.** While file *i* is in Gemini/Groq, file *i+1* is pre-compressed in parallel (`ensureCompressed`) and tagged with `compressedTransformKey` (`buildCloudTransformKey`) so both Gemini and Groq reuse the prewarmed file without double compression.
 - **Undo.** `clearAll` snapshots the queue + active id and keeps it for 12s before revoking preview URLs.
+- `lib/addFilesFeedback.ts` — shared file validator (`isSupportedImageFile`, `partitionSupportedImages`) checking MIME type and extension fallback (`.jpg`, `.jpeg`, `.png`, `.webp`, `.heic`, `.heif`) for Windows Chrome `.heic` uploads while rejecting unsupported formats (`.svg`, `.bmp`, `.gif`) with clear toasts.
 - `lib/highlightDetector.ts` — adaptive paper-white estimation (`estimatePaperWhite`), pixel chromatic classification (`classifyBalancedPixel`), box fill + thick marker underline detection (`isBoxHighlighted`), and fast whole-page chromatic precheck (`checkBlobHasHighlight`).
 - `lib/textFormatters.ts` — `cleanOcrText` strips `<think>` blocks/fences, reconstructs hyphenated words across line breaks, merges soft linebreaks within paragraphs while protecting lists/articles/footnotes, and provides Spanish lexical coherence filters (`isPlausibleSpanishLine`, `scoreTextCoherence`).
 - `lib/imageDownscale.ts` — EXIF-aware (`imageOrientation: 'from-image'`) canvas resize capping cloud images to `1536px` (minimizes vision tile tokens) and local OCR to `1760px`, preferring `image/webp` with JPEG fallback.
+- `lib/exporters.ts` — `.txt`, `.docx`, and `.zip` exporters (`buildUniqueZipFilenames` appends `_2`, `_3` on duplicate base names so no notes are overwritten).
 - `shared/api.ts` — `processOcr(file, name, engine, mode, signal)` multipart builder + error matchers.
 - Zod schemas live in `@ocr-web/shared` (`packages/shared/src/index.ts`), single source of truth.
 
@@ -109,7 +113,7 @@ Feature-Sliced-Design-lite. Layers:
 ## Deployment
 
 - **Backend** → Render.com web service. **Root directory must be empty (repo root), NOT `backend/`** — pnpm workspaces need `pnpm-workspace.yaml` at the root to resolve `@ocr-web/shared`. Build `pnpm install && pnpm --filter backend build`. Start `node backend/dist/index.js`.
-- **Frontend** → Vercel. Root `frontend`, Vite preset. Env: `VITE_API_URL` = Render URL, no trailing `/api`.
+- **Frontend** → Vercel. Root `frontend`, Vite preset. Env: `VITE_API_URL` = Render URL, no trailing `/api`. Includes security headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`) in `frontend/vercel.json`.
 - **CORS whitelist gotcha:** after deploying the frontend, update `ALLOWED_ORIGINS` on the backend with the Vercel URL.
 
 See `DEPLOY.md` for the authoritative deploy instructions — if this section and `DEPLOY.md` ever disagree, `DEPLOY.md` wins.
