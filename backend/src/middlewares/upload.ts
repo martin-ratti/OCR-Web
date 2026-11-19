@@ -1,5 +1,6 @@
 import multer, { FileFilterCallback } from 'multer';
 import type { Request } from 'express';
+import { HttpError } from './errorHandler';
 
 const ALLOWED_MIMES = new Set([
   'image/jpeg',
@@ -10,11 +11,33 @@ const ALLOWED_MIMES = new Set([
   'image/heif',
 ]);
 
+const ALLOWED_EXTENSIONS_RE = /\.(jpe?g|png|webp|gif|heic|heif)$/i;
+
+const VALID_HEIF_BRANDS = new Set([
+  'heic',
+  'heix',
+  'hevc',
+  'hevx',
+  'heim',
+  'heis',
+  'hevm',
+  'hevs',
+  'mif1',
+  'msf1',
+]);
+
 function imageFilter(_req: Request, file: Express.Multer.File, cb: FileFilterCallback) {
-  if (ALLOWED_MIMES.has(file.mimetype)) {
+  const mime = (file.mimetype || '').toLowerCase();
+  const isEmptyOrOctet = !mime || mime === 'application/octet-stream';
+  if (ALLOWED_MIMES.has(mime) || (isEmptyOrOctet && ALLOWED_EXTENSIONS_RE.test(file.originalname || ''))) {
     cb(null, true);
   } else {
-    cb(new Error(`Unsupported mimetype: ${file.mimetype}. Only JPEG, PNG, WebP, GIF, HEIC are allowed.`));
+    cb(
+      new HttpError(
+        415,
+        `Tipo de archivo no soportado (${file.mimetype || 'desconocido'}). Solo se permiten imágenes JPEG, PNG, WebP, GIF o HEIC.`
+      )
+    );
   }
 }
 
@@ -23,6 +46,27 @@ export const uploadImage = multer({
   fileFilter: imageFilter,
   limits: { fileSize: 5 * 1024 * 1024, files: 1 },
 });
+
+function hasValidHeifFtypBrand(buf: Buffer): boolean {
+  if (buf.length < 12) return false;
+  if (buf[4] !== 0x66 || buf[5] !== 0x74 || buf[6] !== 0x79 || buf[7] !== 0x70) {
+    return false;
+  }
+  const majorBrand = buf.subarray(8, 12).toString('ascii').toLowerCase();
+  if (VALID_HEIF_BRANDS.has(majorBrand)) return true;
+
+  const declaredBoxSize = buf.readUInt32BE(0);
+  const boxEnd =
+    declaredBoxSize >= 16 && declaredBoxSize <= buf.length
+      ? Math.min(declaredBoxSize, 64)
+      : Math.min(buf.length, 64);
+
+  for (let offset = 16; offset + 4 <= boxEnd; offset += 4) {
+    const compatBrand = buf.subarray(offset, offset + 4).toString('ascii').toLowerCase();
+    if (VALID_HEIF_BRANDS.has(compatBrand)) return true;
+  }
+  return false;
+}
 
 export function hasValidImageMagicBytes(buf: Buffer): boolean {
   if (!buf || buf.length < 12) return false;
@@ -65,13 +109,8 @@ export function hasValidImageMagicBytes(buf: Buffer): boolean {
   ) {
     return true;
   }
-  // HEIC / HEIF (ISO BMFF with ftyp at byte offset 4)
-  if (
-    buf[4] === 0x66 &&
-    buf[5] === 0x74 &&
-    buf[6] === 0x79 &&
-    buf[7] === 0x70
-  ) {
+  // HEIC / HEIF (ISO BMFF with ftyp at byte offset 4 and valid HEIF brand)
+  if (hasValidHeifFtypBrand(buf)) {
     return true;
   }
 

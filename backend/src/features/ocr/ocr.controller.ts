@@ -29,6 +29,18 @@ export class OcrController {
       }
 
       if (!hasValidImageMagicBytes(req.file.buffer)) {
+        const isSpoofedContainer =
+          req.file.buffer.length >= 12 &&
+          req.file.buffer[4] === 0x66 &&
+          req.file.buffer[5] === 0x74 &&
+          req.file.buffer[6] === 0x79 &&
+          req.file.buffer[7] === 0x70;
+        if (isSpoofedContainer) {
+          throw new HttpError(
+            415,
+            'El contenedor ISO/ftyp subido no es una imagen HEIC/HEIF válida (ej. video MP4/MOV renombrado).'
+          );
+        }
         throw new HttpError(400, 'El archivo subido no es una imagen válida o está dañado.');
       }
 
@@ -61,8 +73,14 @@ export class OcrController {
         mode
       );
 
+      const modelUsed = this.ocrService.getLastModelUsed();
+
       recordOcrSuccess();
-      const body: ExtractResponse = { status: 'success', text };
+      const body: ExtractResponse = {
+        status: 'success',
+        text,
+        ...(modelUsed ? { modelUsed } : {}),
+      };
       res.status(200).json(body);
     } catch (err) {
       recordOcrError(isRateLimited(err));
